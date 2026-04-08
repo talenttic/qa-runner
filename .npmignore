@@ -1,0 +1,19 @@
+node_modules
+dist
+build
+.DS_Store
+.env
+.env.*
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# QA runner runtime data
+tools/qa-runner.db
+tools/qa-runner.*.db
+tools/qa-runner.manifest.json
+tools/qa-runner.plugins.json
+
+# Local QA cases (do not ship with package)
+docs/qa-cases

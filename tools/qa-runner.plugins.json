@@ -1,0 +1,10 @@
+{
+  "types": [
+    {
+      "id": "performance_smoke",
+      "label": "Performance Smoke",
+      "description": "Quick performance sanity checks.",
+      "details": "Runs lightweight performance assertions focused on startup and critical flows."
+    }
+  ]
+}

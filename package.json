@@ -1,0 +1,22 @@
+{
+  "name": "@talenttic-tech-hub/qa-runner",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run -ws build",
+    "changeset": "changeset",
+    "version-packages": "changeset version",
+    "release": "npm run build && npm run test -w @talenttic-tech-hub/qa-runner-core && npm run test:run -w @talenttic-tech-hub/qa-runner-ui && changeset publish",
+    "typecheck": "npm run -ws typecheck",
+    "lint": "npm run -ws lint",
+    "test": "npm run test -w @talenttic-tech-hub/qa-runner-core"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.27.7",
+    "typescript": "^5.6.3",
+    "@types/node": "^22.13.5"
+  }
+}

@@ -1,0 +1,144 @@
+@import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+    --brand-50: 238 242 255;
+    --brand-100: 224 231 255;
+    --brand-200: 199 210 254;
+    --brand-300: 165 180 252;
+    --brand-500: 99 102 241;
+    --brand-700: 67 56 202;
+    --brand-900: 49 46 129;
+  }
+
+  .dark {
+    color-scheme: dark;
+  }
+
+  .theme-emerald {
+    --brand-50: 236 253 245;
+    --brand-100: 209 250 229;
+    --brand-200: 167 243 208;
+    --brand-300: 110 231 183;
+    --brand-500: 16 185 129;
+    --brand-700: 4 120 87;
+    --brand-900: 6 78 59;
+  }
+
+  .theme-sunset {
+    --brand-50: 255 247 237;
+    --brand-100: 255 237 213;
+    --brand-200: 254 215 170;
+    --brand-300: 253 186 116;
+    --brand-500: 249 115 22;
+    --brand-700: 194 65 12;
+    --brand-900: 124 45 18;
+  }
+
+  .theme-contrast {
+    --brand-50: 219 234 254;
+    --brand-100: 191 219 254;
+    --brand-200: 147 197 253;
+    --brand-300: 96 165 250;
+    --brand-500: 37 99 235;
+    --brand-700: 30 64 175;
+    --brand-900: 30 58 138;
+  }
+
+  body {
+    @apply m-0 bg-surface-50 font-sans text-ink-900 antialiased transition-colors duration-200;
+  }
+
+  .dark body {
+    @apply bg-slate-950 text-slate-100;
+  }
+
+  .theme-contrast body {
+    @apply bg-white text-black;
+  }
+
+  .theme-contrast.dark body {
+    @apply bg-black text-white;
+  }
+
+  #root {
+    @apply min-h-screen;
+  }
+}
+
+@layer components {
+  .inf-card {
+    @apply rounded-[28px] border border-surface-200 bg-surface-100 shadow-soft;
+  }
+
+  .dark .inf-card {
+    @apply border-slate-700 bg-slate-900/90;
+  }
+
+  .theme-contrast .inf-card {
+    @apply border-black/80 bg-white;
+  }
+
+  .theme-contrast.dark .inf-card {
+    @apply border-white/80 bg-black;
+  }
+
+  .ring-surface {
+    @apply text-white;
+  }
+
+  .ring-surface-muted {
+    @apply text-brand-500;
+  }
+
+  .dash-grid-line {
+    background-image: linear-gradient(to right, rgba(130, 144, 170, 0.26) 50%, transparent 50%);
+    background-size: 14px 1px;
+    background-repeat: repeat-x;
+    background-position: center;
+  }
+
+  button.border-ink-200,
+  button.border-surface-200,
+  button.border-surface-300 {
+    @apply bg-white text-ink-700 hover:bg-surface-100;
+  }
+
+  .dark button.border-ink-200,
+  .dark button.border-surface-200,
+  .dark button.border-surface-300 {
+    @apply bg-slate-900 text-slate-200 hover:bg-slate-800;
+  }
+
+  .theme-contrast button.border-ink-200,
+  .theme-contrast button.border-surface-200,
+  .theme-contrast button.border-surface-300 {
+    @apply bg-white text-black border-black;
+  }
+
+  .theme-contrast.dark button.border-ink-200,
+  .theme-contrast.dark button.border-surface-200,
+  .theme-contrast.dark button.border-surface-300 {
+    @apply bg-black text-white border-white;
+  }
+
+  button:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible {
+    @apply outline-none ring-2 ring-brand-500 ring-offset-2 ring-offset-white dark:ring-offset-slate-950;
+  }
+
+  .skeleton {
+    @apply animate-pulse rounded-2xl bg-surface-200 dark:bg-slate-700;
+  }
+
+  .skeleton-line {
+    @apply h-4 rounded-full bg-surface-200 dark:bg-slate-700;
+  }
+}

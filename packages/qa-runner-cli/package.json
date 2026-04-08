@@ -1,0 +1,22 @@
+{
+  "name": "@talenttic-tech-hub/qa-runner-cli",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "publishConfig": {
+    "access": "public"
+  },
+  "bin": {
+    "qa-runner": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "echo 'no lint yet'"
+  },
+  "dependencies": {
+    "@talenttic-tech-hub/qa-runner-core": "0.1.0",
+    "@talenttic-tech-hub/qa-runner-daemon": "0.1.0"
+  }
+}

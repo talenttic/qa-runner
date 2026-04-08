@@ -1,0 +1,42 @@
+name: UI Performance Checks
+
+on:
+  pull_request:
+    paths:
+      - "packages/qa-runner-ui/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/ci-ui.yml"
+  push:
+    branches: ["main"]
+
+jobs:
+  ui-performance:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: "npm"
+
+      - name: Install
+        run: npm install
+
+      - name: Build UI
+        run: npm run -w @org/qa-runner-ui build:ui
+
+      - name: UI Tests
+        run: npm run -w @org/qa-runner-ui test:run
+
+      - name: Accessibility Tests
+        run: npm run -w @org/qa-runner-ui test:a11y
+
+      - name: Bundle Size
+        run: npm run -w @org/qa-runner-ui size-limit
+
+      - name: Lighthouse CI
+        run: npm run -w @org/qa-runner-ui lhci

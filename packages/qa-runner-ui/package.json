@@ -1,0 +1,76 @@
+{
+  "name": "@talenttic-tech-hub/qa-runner-ui",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "src/index.d.ts",
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "npm run build:node && npm run build:ui",
+    "build:node": "tsc -p tsconfig.json",
+    "build:ui": "vite build",
+    "dev": "vite --host",
+    "storybook": "storybook dev -p 6006",
+    "build-storybook": "storybook build",
+    "size-limit": "size-limit",
+    "lhci": "lhci autorun --config=./lighthouserc.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test:a11y": "vitest run src/test/accessibility.test.tsx",
+    "lint": "eslint 'src/**/*.{ts,tsx}' --ignore-pattern '*.d.ts' --ignore-pattern 'src/**/*.test.*' --ignore-pattern 'src/**/*.spec.*' --ignore-pattern 'src/test/**/*'",
+    "test": "vitest",
+    "test:ui": "vitest --ui",
+    "test:run": "vitest run",
+    "test:coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@tailwindcss/typography": "^0.5.19",
+    "marked": "^12.0.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@lhci/cli": "^0.13.0",
+    "@size-limit/file": "^11.1.4",
+    "@storybook/addon-a11y": "^8.2.6",
+    "@storybook/addon-essentials": "^8.2.6",
+    "@storybook/addon-interactions": "^8.2.6",
+    "@storybook/react-vite": "^8.2.6",
+    "@testing-library/jest-dom": "^6.4.6",
+    "@testing-library/react": "^15.0.7",
+    "@testing-library/user-event": "^14.5.2",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "@vitest/coverage-v8": "^1.6.0",
+    "@vitest/ui": "^1.6.0",
+    "autoprefixer": "^10.4.20",
+    "eslint": "^8.57.0",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-react-hooks": "^7.0.1",
+    "jest-axe": "^8.0.0",
+    "jsdom": "^24.1.0",
+    "postcss": "^8.4.41",
+    "react-router-dom": "^6.26.2",
+    "size-limit": "^11.1.4",
+    "storybook": "^8.2.6",
+    "tailwindcss": "^3.4.10",
+    "terser": "^5.46.1",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.2",
+    "vitest": "^1.6.0"
+  },
+  "size-limit": [
+    {
+      "path": "dist/assets/*.js",
+      "limit": "300 KB"
+    },
+    {
+      "path": "dist/assets/*.css",
+      "limit": "120 KB"
+    }
+  ]
+}

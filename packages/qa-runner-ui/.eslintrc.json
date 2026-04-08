@@ -1,0 +1,42 @@
+{
+  "env": {
+    "browser": true,
+    "es2020": true
+  },
+  "extends": [
+    "eslint:recommended",
+    "plugin:@typescript-eslint-tech-hub/recommended",
+    "plugin:@typescript-eslint-tech-hub/recommended-requiring-type-checking",
+    "plugin:react-tech-hub/recommended",
+    "plugin:react-hooks-tech-hub/recommended"
+  ],
+  "parser": "@typescript-eslint-tech-hub/parser",
+  "parserOptions": {
+    "ecmaVersion": "latest",
+    "sourceType": "module",
+    "project": ".-tech-hub/tsconfig.json"
+  },
+  "plugins": [
+    "@typescript-eslint",
+    "react",
+    "react-hooks"
+  ],
+  "rules": {
+    "@typescript-eslint-tech-hub/no-unused-vars": ["error", { "argsIgnorePattern": "^_" }],
+    "@typescript-eslint-tech-hub/no-explicit-any": "warn",
+    "@typescript-eslint-tech-hub/no-unnecessary-type-assertion": "warn",
+    "@typescript-eslint-tech-hub/no-unsafe-assignment": "warn",
+    "@typescript-eslint-tech-hub/no-unsafe-member-access": "warn",
+    "@typescript-eslint-tech-hub/no-unsafe-call": "warn",
+    "@typescript-eslint-tech-hub/no-floating-promises": "warn",
+    "react-tech-hub/no-unescaped-entities": "warn",
+    "react-hooks-tech-hub/exhaustive-deps": "warn",
+    "react-tech-hub/react-in-jsx-scope": "off",
+    "react-tech-hub/prop-types": "off"
+  },
+  "settings": {
+    "react": {
+      "version": "detect"
+    }
+  }
+}

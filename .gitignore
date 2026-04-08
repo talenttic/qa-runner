@@ -1,0 +1,24 @@
+# dependencies
+node_modules/
+
+# OS files
+.DS_Store
+
+# env
+.env
+.env.*
+
+# build artifacts
+coverage/
+dist/
+dist-ui/
+.vite/
+storybook-static/
+
+# logs and pids
+*.log
+*.pid
+*.pid.lock
+
+# misc
+*.local
