@@ -6,7 +6,7 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run -ws build",
+    "build": "npm run build -w @talenttic-tech-hub/qa-runner-core && npm run build -w @talenttic-tech-hub/qa-runner-ui && npm run build -w @talenttic-tech-hub/qa-runner-daemon && npm run build -w @talenttic-tech-hub/qa-runner-cli && npm run build -w @talenttic-tech-hub/qa-runner-cloud",
     "changeset": "changeset",
     "version-packages": "changeset version",
     "release": "npm run build && npm run test -w @talenttic-tech-hub/qa-runner-core && npm run test:run -w @talenttic-tech-hub/qa-runner-ui && changeset publish",
