@@ -9,6 +9,6 @@
   "updateInternalDependencies": "patch",
   "ignore": [
     "qa-runner-vscode",
-    "@talenttic-tech-hub/qa-runner-cloud"
+    "@talenttic/qa-runner-cloud"
   ]
 }
