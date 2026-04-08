@@ -2,6 +2,14 @@
   "name": "@talenttic/qa-runner",
   "private": true,
   "version": "0.1.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/talenttic/qa-runner.git"
+  },
+  "homepage": "https://github.com/talenttic/qa-runner",
+  "bugs": {
+    "url": "https://github.com/talenttic/qa-runner/issues"
+  },
   "workspaces": [
     "packages/*"
   ],

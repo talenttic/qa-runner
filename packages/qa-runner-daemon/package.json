@@ -1,6 +1,14 @@
 {
   "name": "@talenttic/qa-runner-daemon",
   "version": "0.1.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/talenttic/qa-runner.git"
+  },
+  "homepage": "https://github.com/talenttic/qa-runner",
+  "bugs": {
+    "url": "https://github.com/talenttic/qa-runner/issues"
+  },
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
