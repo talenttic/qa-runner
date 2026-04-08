@@ -65,11 +65,11 @@
   },
   "size-limit": [
     {
-      "path": "dist/assets/*.js",
+      "path": "dist-ui/assets/js/*.js",
       "limit": "300 KB"
     },
     {
-      "path": "dist/assets/*.css",
+      "path": "dist-ui/assets/css/*.css",
       "limit": "120 KB"
     }
   ]
