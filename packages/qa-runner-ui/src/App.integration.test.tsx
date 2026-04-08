@@ -107,24 +107,18 @@ describe("App Integration", () => {
     expect(themeButton).toHaveTextContent("Light Mode");
   });
 
-  it("provides help and documentation links", async () => {
-    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null as any);
-
+  it("provides documentation link and shortcuts button", async () => {
     render(<App />);
 
-    const helpButton = await screen.findByLabelText("Help and documentation");
-    expect(helpButton).toBeInTheDocument();
-
-    fireEvent.click(helpButton);
-    expect(openSpy).toHaveBeenCalledWith("https://github.com/your-org/qa-runner#readme", "_blank");
+    const shortcutsButton = await screen.findByRole("button", { name: /shortcuts/i });
+    expect(shortcutsButton).toBeInTheDocument();
 
     const docsLink = screen.getByText("documentation");
     expect(docsLink).toHaveAttribute("href", "https://github.com/your-org/qa-runner");
-
-    openSpy.mockRestore();
   });
 
   it("handles error boundary", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     // Mock a component that throws an error
     __setManualTestingPage(() => {
       throw new Error("Test error");
@@ -136,5 +130,7 @@ describe("App Integration", () => {
       expect(screen.getByText("QA Runner UI crashed")).toBeInTheDocument();
       expect(screen.getByText("Test error")).toBeInTheDocument();
     });
+
+    consoleSpy.mockRestore();
   });
 });

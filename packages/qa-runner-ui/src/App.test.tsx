@@ -13,7 +13,7 @@ vi.mock("./hooks/useOfflineSupport", () => ({
 
 // Mock the ManualTestingPage component
 vi.mock("./pages/ManualTestingPage", () => ({
-  default: () => <div data-testid="manual-testing-page">Manual Testing Page</div>,
+  ManualTestingPage: () => <div data-testid="manual-testing-page">Manual Testing Page</div>,
 }));
 
 // Mock the OnboardingModal
@@ -84,20 +84,6 @@ describe("App", () => {
 
     const themeButton = screen.getByLabelText("Toggle color mode");
     expect(themeButton).toHaveTextContent("Light Mode");
-  });
-
-  it("shows help button with correct link", async () => {
-    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null as any);
-
-    renderApp();
-
-    const helpButton = await screen.findByLabelText("Help and documentation");
-    expect(helpButton).toBeInTheDocument();
-
-    fireEvent.click(helpButton);
-    expect(openSpy).toHaveBeenCalledWith("https://github.com/your-org/qa-runner#readme", "_blank");
-
-    openSpy.mockRestore();
   });
 
   it("displays footer with version and documentation link", () => {

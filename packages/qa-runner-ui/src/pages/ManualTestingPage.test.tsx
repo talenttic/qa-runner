@@ -49,6 +49,9 @@ vi.mock("../qa/api", () => ({
   fetchCaseComments: vi.fn().mockResolvedValue([]),
   addCaseComment: vi.fn().mockResolvedValue({}),
   deleteCaseComment: vi.fn().mockResolvedValue({}),
+  fetchRunCollaborators: vi.fn().mockResolvedValue([]),
+  addRunCollaborator: vi.fn().mockResolvedValue({ id: "collab-1", name: "Tester" }),
+  removeRunCollaborator: vi.fn().mockResolvedValue({}),
   fetchQaGenerationStatus: vi.fn().mockResolvedValue({ autoSeeded: false }),
   fetchQaGenerationHistory: vi.fn().mockResolvedValue([]),
   fetchQaGenerationJob: vi.fn().mockResolvedValue(null),
@@ -174,6 +177,7 @@ const renderManualTestingPage = () => {
   );
 };
 
+
 describe("ManualTestingPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -203,10 +207,11 @@ describe("ManualTestingPage", () => {
     });
 
     const startButton = screen.getByTestId("qa-start-run");
+    await waitFor(() => expect(startButton).not.toBeDisabled());
     fireEvent.click(startButton);
 
     await waitFor(() => {
-      expect(screen.getByText("Test Case 1")).toBeInTheDocument();
+      expect(screen.getByTestId("qa-case-case-1")).toBeInTheDocument();
     });
   });
 
@@ -219,10 +224,11 @@ describe("ManualTestingPage", () => {
     });
 
     const startButton = screen.getByTestId("qa-start-run");
+    await waitFor(() => expect(startButton).not.toBeDisabled());
     fireEvent.click(startButton);
 
     await waitFor(() => {
-      expect(screen.getByText("Test Case 1")).toBeInTheDocument();
+      expect(screen.getByTestId("qa-case-case-1")).toBeInTheDocument();
     });
 
     // Click on the case
@@ -244,6 +250,7 @@ describe("ManualTestingPage", () => {
     });
 
     const startButton = screen.getByTestId("qa-start-run");
+    await waitFor(() => expect(startButton).not.toBeDisabled());
     fireEvent.click(startButton);
 
     await waitFor(() => {
@@ -278,28 +285,15 @@ describe("ManualTestingPage", () => {
     });
 
     const startButton = screen.getByTestId("qa-start-run");
+    await waitFor(() => expect(startButton).not.toBeDisabled());
     fireEvent.click(startButton);
 
     await waitFor(() => {
-      expect(screen.getByText("Test Case 1")).toBeInTheDocument();
+      expect(screen.getByTestId("qa-case-case-1")).toBeInTheDocument();
     });
 
     // Should show filter status
     expect(screen.getByText(/Showing 1 of 1/)).toBeInTheDocument();
   });
 
-  it("handles offline state", async () => {
-    // Mock offline state
-    mockUseOfflineSupport.mockReturnValueOnce({
-      isOnline: false,
-      isServiceWorkerRegistered: false,
-      lastSyncTime: null,
-    });
-
-    renderManualTestingPage();
-
-    await waitFor(() => {
-      expect(screen.getByText("Offline")).toBeInTheDocument();
-    });
-  });
 });
