@@ -24,7 +24,7 @@ vi.mock("./pages/ManualTestingPage", () => {
   let Page = () => <div data-testid="manual-testing-page">Manual Testing Page</div>;
 
   return {
-    default: () => Page(),
+    ManualTestingPage: () => Page(),
     __setManualTestingPage: (nextPage: typeof Page) => {
       Page = nextPage;
     },
