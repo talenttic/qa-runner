@@ -30,31 +30,31 @@ jobs:
         run: npm run build
 
       - name: Test (core)
-        run: npm run test -w @talenttic-tech-hub/qa-runner-core
+        run: npm run test -w @talenttic/qa-runner-core
 
       - name: Test (ui)
-        run: npm run test:run -w @talenttic-tech-hub/qa-runner-ui
+        run: npm run test:run -w @talenttic/qa-runner-ui
 
       - name: Publish (core)
-        run: npm publish -w @talenttic-tech-hub/qa-runner-core --access public || echo "Already published"
+        run: npm publish -w @talenttic/qa-runner-core --access public || echo "Already published"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: true
 
       - name: Publish (ui)
-        run: npm publish -w @talenttic-tech-hub/qa-runner-ui --access public || echo "Already published"
+        run: npm publish -w @talenttic/qa-runner-ui --access public || echo "Already published"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: true
 
       - name: Publish (daemon)
-        run: npm publish -w @talenttic-tech-hub/qa-runner-daemon --access public || echo "Already published"
+        run: npm publish -w @talenttic/qa-runner-daemon --access public || echo "Already published"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: true
 
       - name: Publish (cli)
-        run: npm publish -w @talenttic-tech-hub/qa-runner-cli --access public || echo "Already published"
+        run: npm publish -w @talenttic/qa-runner-cli --access public || echo "Already published"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: true

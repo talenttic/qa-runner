@@ -1,4 +1,4 @@
-import { type ChangeEvent, type GenerationResult } from "@talenttic-tech-hub/qa-runner-core";
+import { type ChangeEvent, type GenerationResult } from "@talenttic/qa-runner-core";
 export type DaemonConfig = {
     outputs: {
         manualDir: string;

@@ -5,8 +5,8 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { QaRunnerDaemon, type DaemonConfig, type GenerationOutcome } from "./daemon.js";
-import { validateChangeEvent, type ChangeEvent } from "@talenttic-tech-hub/qa-runner-core";
-import { getUiAssetDir } from "@talenttic-tech-hub/qa-runner-ui";
+import { validateChangeEvent, type ChangeEvent } from "@talenttic/qa-runner-core";
+import { getUiAssetDir } from "@talenttic/qa-runner-ui";
 import { spawnSync } from "node:child_process";
 
 export type ServerConfig = {

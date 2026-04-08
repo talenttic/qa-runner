@@ -1,5 +1,5 @@
 {
-  "name": "@talenttic-tech-hub/qa-runner-cloud",
+  "name": "@talenttic/qa-runner-cloud",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -11,6 +11,6 @@
     "lint": "echo 'no lint yet'"
   },
   "dependencies": {
-    "@talenttic-tech-hub/qa-runner-core": "0.1.0"
+    "@talenttic/qa-runner-core": "0.1.0"
   }
 }

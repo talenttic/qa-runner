@@ -6,18 +6,18 @@ You get:
 2. AI-assisted generation of QA markdown suites and Playwright scaffolds.
 3. A lightweight daemon that reads/writes test suites inside your repo.
 
-> Package scope note: `@talenttic-tech-hub/*` is the current scope for this repo.
+> Package scope note: `@talenttic/*` is the current scope for this repo.
 
 ## What You Install
 
 For manual testing + AI generation, you need:
-1. `@talenttic-tech-hub/qa-runner-cli` (entrypoint command)
-2. `@talenttic-tech-hub/qa-runner-daemon` (API + file access)
-3. `@talenttic-tech-hub/qa-runner-ui` (UI bundle)
-4. `@talenttic-tech-hub/qa-runner-core` (internal dependency)
+1. `@talenttic/qa-runner-cli` (entrypoint command)
+2. `@talenttic/qa-runner-daemon` (API + file access)
+3. `@talenttic/qa-runner-ui` (UI bundle)
+4. `@talenttic/qa-runner-core` (internal dependency)
 
 Not needed right now:
-1. `@talenttic-tech-hub/qa-runner-cloud` (not ready)
+1. `@talenttic/qa-runner-cloud` (not ready)
 2. `qa-runner-vscode` (VS Code marketplace, not npm)
 
 ## Prereqs
@@ -28,7 +28,7 @@ Not needed right now:
 From your project repo:
 
 ```bash
-npm install -D @talenttic-tech-hub/qa-runner-cli
+npm install -D @talenttic/qa-runner-cli
 ```
 
 Start the daemon (this also serves the UI):
@@ -176,7 +176,7 @@ qa-runner report
 The repo publishes to npm on tag pushes matching `v*.*.*`.
 
 Required GitHub secret:
-1. `NPM_TOKEN` (npm automation token with access to `@talenttic-tech-hub`)
+1. `NPM_TOKEN` (npm automation token with access to `@talenttic`)
 
 Release steps:
 1. `git tag v0.1.0`

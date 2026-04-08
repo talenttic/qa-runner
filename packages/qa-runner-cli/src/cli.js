@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import fs from "node:fs";
-import { QaRunnerDaemon, startDaemonServer, startWatcher } from "@talenttic-tech-hub/qa-runner-daemon";
+import { QaRunnerDaemon, startDaemonServer, startWatcher } from "@talenttic/qa-runner-daemon";
 import { loadConfig, resolveOutputs } from "./config";
 import { spawnSync } from "node:child_process";
 const args = process.argv.slice(2);

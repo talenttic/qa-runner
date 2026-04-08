@@ -1,4 +1,4 @@
-import type { ChangeEvent } from "@talenttic-tech-hub/qa-runner-core";
+import type { ChangeEvent } from "@talenttic/qa-runner-core";
 export type WatcherConfig = {
     rootDir: string;
     intervalMs?: number;

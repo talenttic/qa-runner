@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
-import { QaRunnerDaemon, startDaemonServer, startWatcher } from "@talenttic-tech-hub/qa-runner-daemon";
-import type { ChangeEvent } from "@talenttic-tech-hub/qa-runner-core";
+import { QaRunnerDaemon, startDaemonServer, startWatcher } from "@talenttic/qa-runner-daemon";
+import type { ChangeEvent } from "@talenttic/qa-runner-core";
 import { loadConfig, resolveOutputs } from "./config.js";
 import { spawnSync } from "node:child_process";
 
@@ -97,7 +97,7 @@ if (command === "generate") {
     process.exit(1);
   }
 
-  const daemonConfig = { outputs, uiReadPaths: config.ui?.readPaths } as import("@talenttic-tech-hub/qa-runner-daemon").DaemonConfig;
+  const daemonConfig = { outputs, uiReadPaths: config.ui?.readPaths } as import("@talenttic/qa-runner-daemon").DaemonConfig;
   startDaemonServer({
     port,
     daemonConfig,
@@ -127,7 +127,7 @@ if (command === "generate") {
   console.log(`qa-runner daemon listening on http://localhost:${port}/ui`);
 } else if (command === "ui") {
   const port = Number(parseFlag("--port") ?? String(config.server?.port ?? 4545));
-  const daemonConfig = { outputs, uiReadPaths: config.ui?.readPaths } as import("@talenttic-tech-hub/qa-runner-daemon").DaemonConfig;
+  const daemonConfig = { outputs, uiReadPaths: config.ui?.readPaths } as import("@talenttic/qa-runner-daemon").DaemonConfig;
   startDaemonServer({
     port,
     daemonConfig,

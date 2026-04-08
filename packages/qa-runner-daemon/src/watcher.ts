@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { ChangeEvent } from "@talenttic-tech-hub/qa-runner-core";
+import type { ChangeEvent } from "@talenttic/qa-runner-core";
 
 export type WatcherConfig = {
   rootDir: string;

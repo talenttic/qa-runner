@@ -1,8 +1,8 @@
 import http from "node:http";
 import fs from "node:fs";
 import { QaRunnerDaemon } from "./daemon";
-import { validateChangeEvent } from "@talenttic-tech-hub/qa-runner-core";
-import { getUiHtml } from "@talenttic-tech-hub/qa-runner-ui";
+import { validateChangeEvent } from "@talenttic/qa-runner-core";
+import { getUiHtml } from "@talenttic/qa-runner-ui";
 const readJsonBody = (req) => new Promise((resolve, reject) => {
     const chunks = [];
     req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));

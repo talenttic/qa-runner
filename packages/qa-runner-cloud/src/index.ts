@@ -1,4 +1,4 @@
-import type { QaRunReport, QaCoverageReport } from "@talenttic-tech-hub/qa-runner-core";
+import type { QaRunReport, QaCoverageReport } from "@talenttic/qa-runner-core";
 
 export type CloudClientConfig = {
   endpoint: string;

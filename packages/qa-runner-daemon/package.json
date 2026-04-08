@@ -1,5 +1,5 @@
 {
-  "name": "@talenttic-tech-hub/qa-runner-daemon",
+  "name": "@talenttic/qa-runner-daemon",
   "version": "0.1.0",
   "type": "module",
   "main": "dist/index.js",
@@ -13,7 +13,7 @@
     "lint": "echo 'no lint yet'"
   },
   "dependencies": {
-    "@talenttic-tech-hub/qa-runner-core": "0.1.0",
-    "@talenttic-tech-hub/qa-runner-ui": "0.1.0"
+    "@talenttic/qa-runner-core": "0.1.0",
+    "@talenttic/qa-runner-ui": "0.1.0"
   }
 }

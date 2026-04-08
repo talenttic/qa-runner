@@ -1,5 +1,5 @@
 {
-  "name": "@talenttic-tech-hub/qa-runner-ui",
+  "name": "@talenttic/qa-runner-ui",
   "version": "0.1.0",
   "type": "module",
   "main": "dist/index.js",
@@ -14,7 +14,7 @@
     "dev": "vite --host",
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build",
-    "size-limit": "size-limit",
+    "size-limit": "npm run build:ui && size-limit",
     "lhci": "lhci autorun --config=./lighthouserc.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test:a11y": "vitest run src/test/accessibility.test.tsx",

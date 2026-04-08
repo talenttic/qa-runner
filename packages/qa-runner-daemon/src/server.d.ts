@@ -1,6 +1,6 @@
 import http from "node:http";
 import { type DaemonConfig, type GenerationOutcome } from "./daemon";
-import { type ChangeEvent } from "@talenttic-tech-hub/qa-runner-core";
+import { type ChangeEvent } from "@talenttic/qa-runner-core";
 export type ServerConfig = {
     port: number;
     daemonConfig: DaemonConfig;

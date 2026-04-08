@@ -7,7 +7,7 @@ import {
   runGeneration,
   type ChangeEvent,
   type GenerationResult,
-} from "@talenttic-tech-hub/qa-runner-core";
+} from "@talenttic/qa-runner-core";
 
 export type DaemonConfig = {
   outputs: {

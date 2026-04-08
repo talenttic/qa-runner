@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { createManualGuideTemplateSkill, createPlaywrightScaffoldTemplateSkill, runGeneration, } from "@talenttic-tech-hub/qa-runner-core";
+import { createManualGuideTemplateSkill, createPlaywrightScaffoldTemplateSkill, runGeneration, } from "@talenttic/qa-runner-core";
 const slugify = (input) => input
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
