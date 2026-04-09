@@ -18,5 +18,11 @@ npm install @talenttic/qa-runner-core
 ## Use Cases
 If you are building custom tooling on top of QA Runner, you can import core APIs directly.
 
+## Which Package Should I Use?
+1. Run QA Runner in your project → `@talenttic/qa-runner-cli`
+2. Serve UI + API → `@talenttic/qa-runner-daemon`
+3. Extend logic → `@talenttic/qa-runner-core` (this package)
+4. UI dev mode → `@talenttic/qa-runner-ui`
+
 ## Docs
 Main repo: https://github.com/talenttic/qa-runner

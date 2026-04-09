@@ -8,6 +8,12 @@ CLI entrypoint for QA Runner. It:
 ## When to Use
 Use this package in **consumer projects** to run QA Runner without cloning the repo.
 
+## Which Package Should I Use?
+1. Run QA Runner in your project → `@talenttic/qa-runner-cli` (this package)
+2. Serve UI + API → `@talenttic/qa-runner-daemon`
+3. Extend logic → `@talenttic/qa-runner-core`
+4. UI dev mode → `@talenttic/qa-runner-ui`
+
 ## Dependencies / Requirements
 1. Node.js 22+
 2. `@talenttic/qa-runner-daemon` and `@talenttic/qa-runner-core` are installed transitively.

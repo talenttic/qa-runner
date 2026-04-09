@@ -38,6 +38,20 @@ Not needed right now:
    - Frontend UI for manual runs + AI generation.
    - Served by the daemon in real usage.
 
+## Which Package Should I Use?
+
+1. **I want to run QA Runner in my project**  
+   Install `@talenttic/qa-runner-cli`
+
+2. **I want the UI for manual QA**  
+   Run the daemon (`@talenttic/qa-runner-daemon`) and open `http://localhost:4545/ui`
+
+3. **I want to embed or extend QA logic**  
+   Import `@talenttic/qa-runner-core`
+
+4. **I want to hack on the UI itself**  
+   Use `@talenttic/qa-runner-ui` in dev mode (repo only)
+
 ## Prereqs
 1. Node.js 22+
 

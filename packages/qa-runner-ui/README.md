@@ -13,6 +13,12 @@ Use this when you want:
 2. A UI to trigger AI-assisted QA generation.
 3. A UI connected to your project’s `docs/qa-cases` folder.
 
+## Which Package Should I Use?
+1. Run QA Runner in your project → `@talenttic/qa-runner-cli`
+2. Serve UI + API → `@talenttic/qa-runner-daemon`
+3. Extend logic → `@talenttic/qa-runner-core`
+4. UI dev mode → `@talenttic/qa-runner-ui` (this package)
+
 ## Dependencies / Requirements
 1. Node.js 22+
 2. QA Runner daemon running (for real data)
