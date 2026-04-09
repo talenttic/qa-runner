@@ -51,3 +51,4 @@ npm run dev
 
 ## Docs
 Main repo: https://github.com/talenttic/qa-runner
+Daemon package: https://www.npmjs.com/package/@talenttic/qa-runner-daemon
