@@ -14,6 +14,17 @@ Use this package in **consumer projects** to run QA Runner without cloning the r
 3. Extend logic → `@talenttic/qa-runner-core`
 4. UI dev mode → `@talenttic/qa-runner-ui`
 
+## How the Pieces Fit Together
+
+```
+CLI (this package)
+  └── starts Daemon
+        ├── uses Core
+        └── serves UI
+```
+
+In most cases, **install only the CLI**.
+
 ## Dependencies / Requirements
 1. Node.js 22+
 2. `@talenttic/qa-runner-daemon` and `@talenttic/qa-runner-core` are installed transitively.

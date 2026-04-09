@@ -15,6 +15,15 @@ Run the daemon whenever you want the UI to show **real data** and persist runs.
 3. Extend logic → `@talenttic/qa-runner-core`
 4. UI dev mode → `@talenttic/qa-runner-ui`
 
+## How the Pieces Fit Together
+
+```
+CLI
+  └── starts Daemon (this package)
+        ├── uses Core
+        └── serves UI
+```
+
 ## Dependencies / Requirements
 1. Node.js 22+
 2. Local filesystem access to your repo

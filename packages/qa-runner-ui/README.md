@@ -19,6 +19,15 @@ Use this when you want:
 3. Extend logic → `@talenttic/qa-runner-core`
 4. UI dev mode → `@talenttic/qa-runner-ui` (this package)
 
+## How the Pieces Fit Together
+
+```
+CLI
+  └── starts Daemon
+        ├── uses Core
+        └── serves UI (this package)
+```
+
 ## Dependencies / Requirements
 1. Node.js 22+
 2. QA Runner daemon running (for real data)

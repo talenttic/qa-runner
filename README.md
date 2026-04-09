@@ -52,6 +52,17 @@ Not needed right now:
 4. **I want to hack on the UI itself**  
    Use `@talenttic/qa-runner-ui` in dev mode (repo only)
 
+## How the Pieces Fit Together
+
+```
+CLI (entrypoint)
+  └── starts Daemon (local server)
+        ├── uses Core (generation + validation logic)
+        └── serves UI (manual runs + AI controls)
+```
+
+In normal usage, **install the CLI only**. It brings in daemon + core, and the daemon serves the UI.
+
 ## Prereqs
 1. Node.js 22+
 

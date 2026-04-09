@@ -24,5 +24,14 @@ If you are building custom tooling on top of QA Runner, you can import core APIs
 3. Extend logic → `@talenttic/qa-runner-core` (this package)
 4. UI dev mode → `@talenttic/qa-runner-ui`
 
+## How the Pieces Fit Together
+
+```
+CLI
+  └── starts Daemon
+        ├── uses Core (this package)
+        └── serves UI
+```
+
 ## Docs
 Main repo: https://github.com/talenttic/qa-runner
