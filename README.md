@@ -20,6 +20,24 @@ Not needed right now:
 1. `@talenttic/qa-runner-cloud` (not ready)
 2. `qa-runner-vscode` (VS Code marketplace, not npm)
 
+## Package Roles (What Each One Is For)
+
+1. **core** (`@talenttic/qa-runner-core`)
+   - Generation logic, validation, and shared types.
+   - No UI, no server. Used internally by daemon + CLI.
+
+2. **daemon** (`@talenttic/qa-runner-daemon`)
+   - Local server for the UI and API.
+   - Reads/writes `docs/qa-cases`, stores runs in SQLite.
+
+3. **cli** (`@talenttic/qa-runner-cli`)
+   - User entrypoint: starts daemon/UI and runs generation commands.
+   - What most users install in their project.
+
+4. **ui** (`@talenttic/qa-runner-ui`)
+   - Frontend UI for manual runs + AI generation.
+   - Served by the daemon in real usage.
+
 ## Prereqs
 1. Node.js 22+
 
