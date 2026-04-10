@@ -36,13 +36,13 @@ jobs:
         run: npm run build
 
       - name: Test (core)
-        run: npm run test -w @talenttic/qa-runner-core
+        run: npm run test -w @talenttic/qa-runner
 
       - name: Test (ui)
         run: npm run test:run -w @talenttic/qa-runner-ui
 
-      - name: Publish (core)
-        run: npm publish -w @talenttic/qa-runner-core --access public || echo "Already published"
+      - name: Publish (cli)
+        run: npm publish -w @talenttic/qa-runner --access public || echo "Already published"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: true
@@ -55,12 +55,6 @@ jobs:
 
       - name: Publish (daemon)
         run: npm publish -w @talenttic/qa-runner-daemon --access public || echo "Already published"
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_CONFIG_PROVENANCE: true
-
-      - name: Publish (cli)
-        run: npm publish -w @talenttic/qa-runner-cli --access public || echo "Already published"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: true

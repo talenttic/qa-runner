@@ -1,5 +1,5 @@
 {
-  "name": "@talenttic/qa-runner-cli",
+  "name": "@talenttic/qa-runner",
   "version": "0.1.1",
   "repository": {
     "type": "git",
@@ -21,10 +21,10 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "echo 'no lint yet'"
+    "lint": "echo 'no lint yet'",
+    "test": "node --test dist/core/__tests__/*.test.js"
   },
   "dependencies": {
-    "@talenttic/qa-runner-core": "0.1.1",
-    "@talenttic/qa-runner-daemon": "0.1.1"
+    "@talenttic/qa-runner-ui": "0.1.1"
   }
 }

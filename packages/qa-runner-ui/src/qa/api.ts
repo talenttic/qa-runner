@@ -26,6 +26,7 @@ import type {
   QaGithubIssueRequest,
   QaGithubIssueResponse,
   QaCustomTestType,
+  QaFlakinessReport,
 } from "./types";
 
 const parseError = async (response: Response): Promise<Error> => {
@@ -288,6 +289,18 @@ export const fetchQaRuntimeStatus = async (): Promise<QaRuntimeStatus> => {
   const payload = (await response.json()) as { data?: QaRuntimeStatus };
   if (!payload.data) {
     throw new Error("QA runtime response shape mismatch");
+  }
+  return payload.data;
+};
+
+export const fetchQaFlakinessReport = async (): Promise<QaFlakinessReport> => {
+  const response = await apiFetch(`${API_URL}/plugin/qa/flakiness`);
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  const payload = (await response.json()) as { data?: QaFlakinessReport };
+  if (!payload.data) {
+    throw new Error("QA flakiness response shape mismatch");
   }
   return payload.data;
 };

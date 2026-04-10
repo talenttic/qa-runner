@@ -11,43 +11,40 @@ You get:
 ## What You Install
 
 For manual testing + AI generation, you need:
-1. `@talenttic/qa-runner-cli` (entrypoint command)
+1. `@talenttic/qa-runner` (entrypoint command)
 2. `@talenttic/qa-runner-daemon` (API + file access)
 3. `@talenttic/qa-runner-ui` (UI bundle)
-4. `@talenttic/qa-runner-core` (internal dependency)
 
 Not needed right now:
-1. `@talenttic/qa-runner-cloud` (not ready)
-2. `qa-runner-vscode` (VS Code marketplace, not npm)
+1. `qa-runner-vscode` (VS Code marketplace, not npm)
+
+Cloud note:
+`@talenttic/qa-runner-cloud` now lives in a **separate repo** and is not part of this workspace.
 
 ## Package Roles (What Each One Is For)
 
-1. **core** (`@talenttic/qa-runner-core`)
-   - Generation logic, validation, and shared types.
-   - No UI, no server. Used internally by daemon + CLI.
-
-2. **daemon** (`@talenttic/qa-runner-daemon`)
+1. **daemon** (`@talenttic/qa-runner-daemon`)
    - Local server for the UI and API.
    - Reads/writes `docs/qa-cases`, stores runs in SQLite.
 
-3. **cli** (`@talenttic/qa-runner-cli`)
+2. **cli** (`@talenttic/qa-runner`)
    - User entrypoint: starts daemon/UI and runs generation commands.
    - What most users install in their project.
 
-4. **ui** (`@talenttic/qa-runner-ui`)
+3. **ui** (`@talenttic/qa-runner-ui`)
    - Frontend UI for manual runs + AI generation.
    - Served by the daemon in real usage.
 
 ## Which Package Should I Use?
 
 1. **I want to run QA Runner in my project**  
-   Install `@talenttic/qa-runner-cli`
+   Install `@talenttic/qa-runner`
 
 2. **I want the UI for manual QA**  
    Run the daemon (`@talenttic/qa-runner-daemon`) and open `http://localhost:4545/ui`
 
 3. **I want to embed or extend QA logic**  
-   Import `@talenttic/qa-runner-core`
+   Import `@talenttic/qa-runner`
 
 4. **I want to hack on the UI itself**  
    Use `@talenttic/qa-runner-ui` in dev mode (repo only)
@@ -57,11 +54,11 @@ Not needed right now:
 ```
 CLI (entrypoint)
   └── starts Daemon (local server)
-        ├── uses Core (generation + validation logic)
+        ├── uses core exports (generation + validation logic)
         └── serves UI (manual runs + AI controls)
 ```
 
-In normal usage, **install the CLI only**. It brings in daemon + core, and the daemon serves the UI.
+In normal usage, **install the CLI only**. It brings in the daemon, and the daemon serves the UI.
 
 ## Prereqs
 1. Node.js 22+
@@ -71,7 +68,7 @@ In normal usage, **install the CLI only**. It brings in daemon + core, and the d
 From your project repo:
 
 ```bash
-npm install -D @talenttic/qa-runner-cli
+npm install -D @talenttic/qa-runner
 ```
 
 Start the daemon (this also serves the UI):
@@ -84,6 +81,12 @@ Open the UI:
 
 ```
 http://localhost:4545/ui
+```
+
+Standalone demo UI (no daemon, sample data):
+
+```bash
+npx qa-runner demo
 ```
 
 If you want to run the UI separately (Vite dev server, repo only):

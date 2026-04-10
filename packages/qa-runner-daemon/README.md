@@ -10,9 +10,9 @@ Local daemon that powers QA Runner. It:
 Run the daemon whenever you want the UI to show **real data** and persist runs.
 
 ## Which Package Should I Use?
-1. Run QA Runner in your project → `@talenttic/qa-runner-cli`
+1. Run QA Runner in your project → `@talenttic/qa-runner`
 2. Serve UI + API → `@talenttic/qa-runner-daemon` (this package)
-3. Extend logic → `@talenttic/qa-runner-core`
+3. Extend logic → `@talenttic/qa-runner` (core exports)
 4. UI dev mode → `@talenttic/qa-runner-ui`
 
 ## How the Pieces Fit Together
@@ -20,14 +20,14 @@ Run the daemon whenever you want the UI to show **real data** and persist runs.
 ```
 CLI
   └── starts Daemon (this package)
-        ├── uses Core
+        ├── uses core exports
         └── serves UI
 ```
 
 ## Dependencies / Requirements
 1. Node.js 22+
 2. Local filesystem access to your repo
-3. `@talenttic/qa-runner-core` (internal dependency)
+3. `@talenttic/qa-runner` (internal dependency)
 4. `@talenttic/qa-runner-ui` (served UI bundle)
 
 ## Install

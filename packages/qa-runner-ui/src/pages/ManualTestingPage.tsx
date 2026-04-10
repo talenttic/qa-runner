@@ -24,6 +24,7 @@ import {
   fetchQaGenerationHistory,
   fetchQaGenerationJob,
   fetchQaGenerationStatus,
+  fetchQaFlakinessReport,
   fetchQaWorkspaces,
   fetchQaMarkdownValidation,
   fetchQaRuntimeStatus,
@@ -57,6 +58,7 @@ import type {
   QaCaseComment,
   QaCaseStatus,
   QaCustomTestType,
+  QaFlakinessReport,
   QaGenerationJob,
   QaGenerationStatus,
   QaWorkspaceProfile,
@@ -387,6 +389,8 @@ const ManualTestingPageContent = ({
   const [runtimeStatus, setRuntimeStatus] = useState<QaRuntimeStatus | null>(null);
   const [runtimeLoading, setRuntimeLoading] = useState(false);
   const [runtimeAutoRefresh, setRuntimeAutoRefresh] = useState(false);
+  const [flakinessReport, setFlakinessReport] = useState<QaFlakinessReport | null>(null);
+  const [flakinessLoading, setFlakinessLoading] = useState(false);
   const [destructiveModalAction, setDestructiveModalAction] = useState<QaDestructiveAction | null>(null);
   const [destructiveReason, setDestructiveReason] = useState("");
   const destructiveModalRef = useRef<HTMLDivElement | null>(null);
@@ -708,6 +712,18 @@ const ManualTestingPageContent = ({
     }
   };
 
+  const loadFlakinessReport = async (): Promise<void> => {
+    setFlakinessLoading(true);
+    try {
+      const report = await fetchQaFlakinessReport();
+      setFlakinessReport(report);
+    } catch {
+      setFlakinessReport(null);
+    } finally {
+      setFlakinessLoading(false);
+    }
+  };
+
   const loadRunHistory = async (suiteIdOverride?: string): Promise<void> => {
     const suiteId = (suiteIdOverride ?? selectedSuiteId).trim();
     if (!suiteId) {
@@ -778,6 +794,7 @@ const ManualTestingPageContent = ({
   useEffect(() => {
     void loadSuites();
     void loadRuntimeStatus();
+    void loadFlakinessReport();
     void fetchQaCustomTestTypes()
       .then(setCustomTestTypes)
       .catch(() => setCustomTestTypes([]));
@@ -810,6 +827,7 @@ const ManualTestingPageContent = ({
     }
     const timer = setInterval(() => {
       void loadRuntimeStatus();
+      void loadFlakinessReport();
     }, 30000);
     return () => clearInterval(timer);
   }, [mode, runtimeAutoRefresh]);
@@ -2348,7 +2366,10 @@ const ManualTestingPageContent = ({
                   </button>
                   <button
                     type="button"
-                    onClick={() => void loadRuntimeStatus()}
+                    onClick={() => {
+                      void loadRuntimeStatus();
+                      void loadFlakinessReport();
+                    }}
                     className="rounded-lg border border-rose-300 px-2 py-1 text-xs font-semibold text-rose-700"
                   >
                     Retry Runtime
@@ -2383,7 +2404,10 @@ const ManualTestingPageContent = ({
                     </label>
                     <button
                       type="button"
-                      onClick={() => void loadRuntimeStatus()}
+                      onClick={() => {
+                        void loadRuntimeStatus();
+                        void loadFlakinessReport();
+                      }}
                       disabled={runtimeLoading}
                       className="rounded-lg border border-surface-300 px-2 py-1 text-xs font-semibold text-ink-700 disabled:opacity-60 dark:border-slate-700 dark:text-slate-200"
                     >
@@ -2458,6 +2482,74 @@ const ManualTestingPageContent = ({
                     </>
                   )}
                 </p>
+              </div>
+
+              <div className="rounded-lg border border-surface-300 bg-white p-3 text-sm dark:border-slate-700 dark:bg-slate-900">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="font-semibold text-ink-900 dark:text-white">Flakiness Dashboard</p>
+                  <button
+                    type="button"
+                    onClick={() => void loadFlakinessReport()}
+                    disabled={flakinessLoading}
+                    className="rounded-lg border border-surface-300 px-2 py-1 text-xs font-semibold text-ink-700 disabled:opacity-60 dark:border-slate-700 dark:text-slate-200"
+                  >
+                    {flakinessLoading ? "Refreshing..." : "Refresh Flakiness"}
+                  </button>
+                </div>
+                {flakinessReport ? (
+                  <>
+                    <p className="mt-2 text-xs text-ink-600 dark:text-slate-300">
+                      Cases: <span className="font-semibold">{flakinessReport.summary.totalCases}</span> · Unstable:{" "}
+                      <span className="font-semibold">{flakinessReport.summary.unstableCases}</span> · Avg flake score:{" "}
+                      <span className="font-semibold">{flakinessReport.summary.avgFlakeScore}</span> · Trend:{" "}
+                      <span className="font-semibold">{flakinessReport.summary.trend}</span>
+                    </p>
+                    <p className="mt-1 text-xs text-ink-600 dark:text-slate-300">
+                      Categories — selector: <span className="font-semibold">{flakinessReport.summary.categories.selector}</span>,
+                      timing: <span className="font-semibold"> {flakinessReport.summary.categories.timing}</span>,
+                      assertion: <span className="font-semibold"> {flakinessReport.summary.categories.assertion}</span>
+                    </p>
+                    {flakinessReport.records.length > 0 ? (
+                      <div className="mt-2 max-h-44 overflow-auto rounded border border-surface-300 dark:border-slate-700">
+                        <table className="min-w-full text-xs">
+                          <thead className="bg-surface-50 dark:bg-slate-950/40">
+                            <tr>
+                              <th className="px-2 py-1 text-left">Case</th>
+                              <th className="px-2 py-1 text-left">Flake</th>
+                              <th className="px-2 py-1 text-left">Pass Rate</th>
+                              <th className="px-2 py-1 text-left">Runs</th>
+                              <th className="px-2 py-1 text-left">Category</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {flakinessReport.records.slice(0, 8).map((record) => (
+                              <tr key={record.testId} className="border-t border-surface-200 dark:border-slate-800">
+                                <td className="px-2 py-1"><code>{record.testId}</code></td>
+                                <td className="px-2 py-1">{record.flakeScore}</td>
+                                <td className="px-2 py-1">{record.passRate}</td>
+                                <td className="px-2 py-1">{record.totalRuns}</td>
+                                <td className="px-2 py-1">{record.dominantCategory ?? "none"}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : (
+                      <p className="mt-2 text-xs text-ink-600 dark:text-slate-300">No flakiness records yet.</p>
+                    )}
+                    {flakinessReport.recommendations.length > 0 ? (
+                      <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-ink-700 dark:text-slate-200">
+                        {flakinessReport.recommendations.map((item, index) => (
+                          <li key={`${item}-${index}`}>{item}</li>
+                        ))}
+                      </ul>
+                    ) : null}
+                  </>
+                ) : (
+                  <p className="mt-2 text-xs text-ink-600 dark:text-slate-300">
+                    Flakiness report unavailable. Generate tests to produce runtime records.
+                  </p>
+                )}
               </div>
 
               <div>
@@ -3148,7 +3240,10 @@ const ManualTestingPageContent = ({
           <div className="flex flex-wrap gap-2">
             <button
               type="button"
-              onClick={() => void loadRuntimeStatus()}
+              onClick={() => {
+                void loadRuntimeStatus();
+                void loadFlakinessReport();
+              }}
               className="rounded-lg border border-surface-300 px-3 py-2 text-xs font-semibold text-ink-700 dark:border-slate-700 dark:text-slate-200"
             >
               Refresh Runtime

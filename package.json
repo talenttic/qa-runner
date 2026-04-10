@@ -14,17 +14,25 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build -w @talenttic/qa-runner-core && npm run build -w @talenttic/qa-runner-ui && npm run build -w @talenttic/qa-runner-daemon && npm run build -w @talenttic/qa-runner-cli && npm run build -w @talenttic/qa-runner-cloud",
+    "qa:daemon": "npx qa-runner daemon start",
+    "qa:ui": "npx qa-runner ui",
+    "qa:generate": "npx qa-runner generate",
+    "qa:test": "npx qa-runner test",
+    "qa:report": "npx qa-runner report",
+    "qa:kpi": "npx qa-runner report --kpi --baseline-manifest tools/qa-runner.manifest.baseline.json",
+    "qa:kpi:enforce": "npx qa-runner report --kpi --baseline-manifest tools/qa-runner.manifest.baseline.json --enforce-kpi",
+    "qa:demo": "npx qa-runner demo",
+    "build": "npm run build -w @talenttic/qa-runner-ui && npm run build -w @talenttic/qa-runner && npm run build -w @talenttic/qa-runner-daemon",
     "changeset": "changeset",
     "version-packages": "changeset version",
-    "release": "npm run build && npm run test -w @talenttic/qa-runner-core && npm run test:run -w @talenttic/qa-runner-ui && changeset publish",
+    "release": "npm run build && npm run test -w @talenttic/qa-runner && npm run test:run -w @talenttic/qa-runner-ui && changeset publish",
     "typecheck": "npm run -ws typecheck",
     "lint": "npm run -ws lint",
-    "test": "npm run test -w @talenttic/qa-runner-core"
+    "test": "npm run test -w @talenttic/qa-runner"
   },
   "devDependencies": {
     "@changesets/cli": "^2.27.7",
-    "typescript": "^5.6.3",
-    "@types/node": "^22.13.5"
+    "@types/node": "^22.13.5",
+    "typescript": "^5.6.3"
   }
 }

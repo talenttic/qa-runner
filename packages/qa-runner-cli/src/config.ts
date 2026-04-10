@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import type { SkillsConfig } from "./core/index.js";
 
 export type QaRunnerCliConfig = {
   outputs?: {
@@ -8,6 +9,7 @@ export type QaRunnerCliConfig = {
     e2eDir?: string;
     manifestPath?: string;
   };
+  skills?: SkillsConfig;
   server?: {
     port?: number;
   };
@@ -25,6 +27,18 @@ export type QaRunnerCliConfig = {
   ui?: {
     readPaths?: string[];
   };
+  environments?: Record<
+    string,
+    {
+      autoTest?: {
+        enabled?: boolean;
+      };
+      healing?: {
+        strategy?: "aggressive" | "moderate" | "conservative";
+        retryBudget?: number | "unlimited";
+      };
+    }
+  >;
 };
 
 const loadJson = (filePath: string): QaRunnerCliConfig => JSON.parse(fs.readFileSync(filePath, "utf-8"));

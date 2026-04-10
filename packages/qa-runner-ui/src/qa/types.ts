@@ -414,6 +414,36 @@ export interface QaRuntimeStatus {
   extractionTiming?: "in_repo_until_v1";
 }
 
+export interface QaFlakinessRecord {
+  testId: string;
+  flakeScore: number;
+  passRate: number;
+  totalRuns: number;
+  unstable: boolean;
+  dominantCategory?: "timing" | "selector" | "assertion" | "none";
+  categoryBreakdown?: {
+    timing: number;
+    selector: number;
+    assertion: number;
+  };
+}
+
+export interface QaFlakinessReport {
+  records: QaFlakinessRecord[];
+  summary: {
+    totalCases: number;
+    unstableCases: number;
+    avgFlakeScore: number;
+    categories: {
+      timing: number;
+      selector: number;
+      assertion: number;
+    };
+    trend: "stable" | "watch" | "degrading";
+  };
+  recommendations: string[];
+}
+
 export interface QaCustomTestType {
   id: string;
   label: string;

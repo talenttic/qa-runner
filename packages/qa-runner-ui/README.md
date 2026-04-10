@@ -14,9 +14,9 @@ Use this when you want:
 3. A UI connected to your project’s `docs/qa-cases` folder.
 
 ## Which Package Should I Use?
-1. Run QA Runner in your project → `@talenttic/qa-runner-cli`
+1. Run QA Runner in your project → `@talenttic/qa-runner`
 2. Serve UI + API → `@talenttic/qa-runner-daemon`
-3. Extend logic → `@talenttic/qa-runner-core`
+3. Extend logic → `@talenttic/qa-runner`
 4. UI dev mode → `@talenttic/qa-runner-ui` (this package)
 
 ## How the Pieces Fit Together
@@ -24,14 +24,14 @@ Use this when you want:
 ```
 CLI
   └── starts Daemon
-        ├── uses Core
+        ├── uses core exports
         └── serves UI (this package)
 ```
 
 ## Dependencies / Requirements
 1. Node.js 22+
 2. QA Runner daemon running (for real data)
-3. `@talenttic/qa-runner-daemon` and `@talenttic/qa-runner-core` are required by the full stack.
+3. `@talenttic/qa-runner-daemon` and `@talenttic/qa-runner` are required by the full stack.
 
 ## Install
 
@@ -49,6 +49,12 @@ Then open:
 
 ```
 http://localhost:4545/ui
+```
+
+Standalone demo UI (no daemon, sample data):
+
+```bash
+npx qa-runner demo
 ```
 
 ## Dev (standalone UI)

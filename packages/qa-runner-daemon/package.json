@@ -21,7 +21,6 @@
     "lint": "echo 'no lint yet'"
   },
   "dependencies": {
-    "@talenttic/qa-runner-core": "0.1.1",
-    "@talenttic/qa-runner-ui": "0.1.1"
+    "@talenttic/qa-runner": "0.1.1"
   }
 }

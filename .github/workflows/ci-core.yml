@@ -3,7 +3,6 @@ name: Core Build and Tests
 on:
   pull_request:
     paths:
-      - "packages/qa-runner-core/**"
       - "packages/qa-runner-daemon/**"
       - "packages/qa-runner-cli/**"
       - "packages/qa-runner-cloud/**"
@@ -31,9 +30,8 @@ jobs:
 
       - name: Build (core + daemon + cli)
         run: |
-          npm run build -w @talenttic/qa-runner-core
+          npm run build -w @talenttic/qa-runner
           npm run build -w @talenttic/qa-runner-daemon
-          npm run build -w @talenttic/qa-runner-cli
 
       - name: Core Tests
-        run: npm run test -w @talenttic/qa-runner-core
+        run: npm run test -w @talenttic/qa-runner

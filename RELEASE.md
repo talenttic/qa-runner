@@ -9,7 +9,7 @@ Keep `main` always releasable while preventing accidental broken publishes.
 ## Required Checks (PR Gate)
 Every PR to `main` must pass:
 1. `npm run build`
-2. `npm run test -w @talenttic/qa-runner-core`
+2. `npm run test -w @talenttic/qa-runner`
 3. `npm run -w @talenttic/qa-runner-ui test:run`
 4. `npm run -w @talenttic/qa-runner-ui size-limit`
 

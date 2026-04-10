@@ -1,4 +1,4 @@
-# @talenttic/qa-runner-cli
+# @talenttic/qa-runner
 
 CLI entrypoint for QA Runner. It:
 1. Starts the daemon + UI
@@ -9,17 +9,16 @@ CLI entrypoint for QA Runner. It:
 Use this package in **consumer projects** to run QA Runner without cloning the repo.
 
 ## Which Package Should I Use?
-1. Run QA Runner in your project → `@talenttic/qa-runner-cli` (this package)
+1. Run QA Runner in your project → `@talenttic/qa-runner` (this package)
 2. Serve UI + API → `@talenttic/qa-runner-daemon`
-3. Extend logic → `@talenttic/qa-runner-core`
-4. UI dev mode → `@talenttic/qa-runner-ui`
+3. UI dev mode → `@talenttic/qa-runner-ui`
 
 ## How the Pieces Fit Together
 
 ```
 CLI (this package)
   └── starts Daemon
-        ├── uses Core
+        ├── uses core exports
         └── serves UI
 ```
 
@@ -27,12 +26,12 @@ In most cases, **install only the CLI**.
 
 ## Dependencies / Requirements
 1. Node.js 22+
-2. `@talenttic/qa-runner-daemon` and `@talenttic/qa-runner-core` are installed transitively.
+2. No additional QA Runner packages are required for local usage.
 
 ## Install
 
 ```bash
-npm install -D @talenttic/qa-runner-cli
+npm install -D @talenttic/qa-runner
 ```
 
 ## Commands
@@ -43,16 +42,36 @@ Start daemon:
 npx qa-runner daemon start
 ```
 
+Standalone demo UI (no daemon, sample data):
+
+```bash
+npx qa-runner demo
+```
+
 Generate QA suites + tests:
 
 ```bash
-npx qa-runner generate --summary "..." --files src/... --mode manual|e2e|all
+npx qa-runner generate --summary "..." --files src/... --mode manual|e2e|all --auto-test|--no-auto-test --healing=moderate
 ```
 
 Generate deterministic output in CI:
 
 ```bash
 npx qa-runner generate --summary "..." --files src/... --mode all --ci
+```
+
+Run tests with healing and validation gates:
+
+```bash
+npx qa-runner test --env stage --validate-manual-cases --report-healing-stats --validate-healing-rate 20%
+```
+
+Generate KPI report and enforce thresholds:
+
+```bash
+npx qa-runner report --kpi \
+  --baseline-manifest tools/qa-runner.manifest.baseline.json \
+  --enforce-kpi
 ```
 
 ## What It Does Not Do
