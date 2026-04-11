@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { once } from "node:events";
-import type http from "node:http";
+import http from "node:http";
 import { startDaemonServer } from "../server.js";
 
 type JsonResponse<T> = { data?: T; error?: string };
@@ -154,6 +154,142 @@ const closeServer = async (server: http.Server): Promise<void> => {
   });
 };
 
+const readRequestBody = (req: http.IncomingMessage): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
+    req.on("error", reject);
+  });
+
+const startFakeMcpServer = async (): Promise<{ url: string; close: () => Promise<void> }> => {
+  const state = {
+    currentUrl: "http://example.test/",
+    fields: new Map<string, string>(),
+    visibleTexts: new Set<string>(["login"]),
+  };
+  const sessionId = "qa-runner-mcp-session";
+  const expectedPassword = process.env.FAKE_EXPECTED_PASSWORD || "correct-password";
+
+  const sendSse = (res: http.ServerResponse, id: number, result: unknown): void => {
+    const payload = JSON.stringify({ jsonrpc: "2.0", id, result });
+    res.writeHead(200, {
+      "content-type": "text/event-stream",
+      "mcp-session-id": sessionId,
+    });
+    res.end(`event: message\ndata: ${payload}\n\n`);
+  };
+
+  const server = http.createServer(async (req, res) => {
+    if (req.method !== "POST" || req.url !== "/mcp") {
+      res.writeHead(404).end("not_found");
+      return;
+    }
+    const rawBody = await readRequestBody(req);
+    const body = JSON.parse(rawBody || "{}") as {
+      id?: number;
+      method?: string;
+      params?: any;
+    };
+    if (body.method === "initialize") {
+      sendSse(res, Number(body.id ?? 1), {
+        protocolVersion: "2025-03-26",
+        capabilities: { tools: {} },
+        serverInfo: { name: "fake-playwright-mcp", version: "0.0.1" },
+      });
+      return;
+    }
+    if (body.method === "notifications/initialized") {
+      res.writeHead(202).end("ok");
+      return;
+    }
+    if (body.method !== "tools/call") {
+      sendSse(res, Number(body.id ?? 1), {
+        content: [{ type: "text", text: "unsupported" }],
+        isError: true,
+      });
+      return;
+    }
+
+    const name = String(body.params?.name ?? "");
+    const args = (body.params?.arguments ?? {}) as Record<string, unknown>;
+    const id = Number(body.id ?? 1);
+    const ok = (text: string) => sendSse(res, id, { content: [{ type: "text", text }] });
+    const fail = (text: string) => sendSse(res, id, { content: [{ type: "text", text }], isError: true });
+
+    switch (name) {
+      case "browser_navigate": {
+        const target = String(args.url ?? "");
+        state.currentUrl = target;
+        ok(`navigated:${target}`);
+        return;
+      }
+      case "browser_snapshot": {
+        const includeDashboard = state.visibleTexts.has("dashboard");
+        const snapshot =
+          `- textbox \"Email\" [ref=email_field]\n` +
+          `- textbox \"Password\" [ref=password_field]\n` +
+          `- button \"Login\" [ref=login_button]\n` +
+          (includeDashboard ? `- text \"dashboard\" [ref=dashboard_text]\n` : "");
+        ok(snapshot);
+        return;
+      }
+      case "browser_type": {
+        const ref = String(args.ref ?? "");
+        const text = String(args.text ?? "");
+        state.fields.set(ref, text);
+        ok("typed");
+        return;
+      }
+      case "browser_click": {
+        const ref = String(args.ref ?? "");
+        if (ref === "login_button") {
+          const password = state.fields.get("password_field") ?? "";
+          if (password === expectedPassword) {
+            state.currentUrl = "http://example.test/dashboard";
+            state.visibleTexts.add("dashboard");
+          }
+        }
+        ok("clicked");
+        return;
+      }
+      case "browser_wait_for": {
+        const text = String(args.text ?? "").toLowerCase();
+        if (text && !Array.from(state.visibleTexts).some((item) => item.includes(text))) {
+          fail(`text_not_visible: ${text}`);
+          return;
+        }
+        ok("waited");
+        return;
+      }
+      case "browser_evaluate": {
+        ok(state.currentUrl);
+        return;
+      }
+      case "browser_console_messages": {
+        ok("No console messages");
+        return;
+      }
+      case "browser_network_requests": {
+        ok("No network requests");
+        return;
+      }
+      default: {
+        fail(`unknown_tool: ${name}`);
+      }
+    }
+  });
+
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  return {
+    url: `http://127.0.0.1:${address.port}/mcp`,
+    close: () => closeServer(server),
+  };
+};
+
 const setupWorkspace = () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "qa-runner-manual-ai-"));
   const casesDir = path.join(root, "docs", "qa-cases");
@@ -215,20 +351,7 @@ test("manual AI execution completes happy path checklist", { concurrency: false 
   const workspace = setupWorkspace();
   const previousCwd = process.cwd();
   process.chdir(workspace.root);
-  const server = startDaemonServer({
-    port: 0,
-    daemonConfig: {
-      outputs: {
-        manualDir: workspace.casesDir,
-        e2eDir: workspace.e2eDir,
-        manifestPath: workspace.manifestPath,
-      },
-    },
-  });
-  await once(server, "listening");
-  const address = server.address();
-  assert.ok(address && typeof address === "object");
-  const baseUrl = `http://127.0.0.1:${address.port}`;
+  let server: http.Server | null = null;
 
   try {
     await withEnv(
@@ -241,6 +364,23 @@ test("manual AI execution completes happy path checklist", { concurrency: false 
         FAKE_EXPECTED_PASSWORD: "correct-password",
       },
       async () => {
+        server = startDaemonServer({
+          port: 0,
+          daemonConfig: {
+            outputs: {
+              manualDir: workspace.casesDir,
+              e2eDir: workspace.e2eDir,
+              manifestPath: workspace.manifestPath,
+            },
+          },
+        });
+        await once(server, "listening");
+        const address = server.address();
+        assert.ok(address && typeof address === "object");
+        const baseUrl = `http://127.0.0.1:${address.port}`;
+        const runtime = await requestJson<{ executionMode: string }>(baseUrl, "/plugin/qa/runtime");
+        assert.equal(runtime.executionMode, "shell");
+
         const suites = await requestJson<Array<{ id: string }>>(baseUrl, "/plugin/qa/suites");
         assert.ok(suites.length > 0);
         const run = await requestJson<{ id: string }>(baseUrl, "/plugin/qa/runs", {
@@ -274,7 +414,9 @@ test("manual AI execution completes happy path checklist", { concurrency: false 
       },
     );
   } finally {
-    await closeServer(server);
+    if (server) {
+      await closeServer(server);
+    }
     process.chdir(previousCwd);
     fs.rmSync(workspace.root, { recursive: true, force: true });
   }
@@ -284,20 +426,7 @@ test("manual AI execution fails with useful reason when verify step fails", { co
   const workspace = setupWorkspace();
   const previousCwd = process.cwd();
   process.chdir(workspace.root);
-  const server = startDaemonServer({
-    port: 0,
-    daemonConfig: {
-      outputs: {
-        manualDir: workspace.casesDir,
-        e2eDir: workspace.e2eDir,
-        manifestPath: workspace.manifestPath,
-      },
-    },
-  });
-  await once(server, "listening");
-  const address = server.address();
-  assert.ok(address && typeof address === "object");
-  const baseUrl = `http://127.0.0.1:${address.port}`;
+  let server: http.Server | null = null;
 
   try {
     await withEnv(
@@ -310,6 +439,23 @@ test("manual AI execution fails with useful reason when verify step fails", { co
         FAKE_EXPECTED_PASSWORD: "correct-password",
       },
       async () => {
+        server = startDaemonServer({
+          port: 0,
+          daemonConfig: {
+            outputs: {
+              manualDir: workspace.casesDir,
+              e2eDir: workspace.e2eDir,
+              manifestPath: workspace.manifestPath,
+            },
+          },
+        });
+        await once(server, "listening");
+        const address = server.address();
+        assert.ok(address && typeof address === "object");
+        const baseUrl = `http://127.0.0.1:${address.port}`;
+        const runtime = await requestJson<{ executionMode: string }>(baseUrl, "/plugin/qa/runtime");
+        assert.equal(runtime.executionMode, "shell");
+
         const suites = await requestJson<Array<{ id: string }>>(baseUrl, "/plugin/qa/suites");
         assert.ok(suites.length > 0);
         const run = await requestJson<{ id: string }>(baseUrl, "/plugin/qa/runs", {
@@ -342,7 +488,88 @@ test("manual AI execution fails with useful reason when verify step fails", { co
       },
     );
   } finally {
-    await closeServer(server);
+    if (server) {
+      await closeServer(server);
+    }
+    process.chdir(previousCwd);
+    fs.rmSync(workspace.root, { recursive: true, force: true });
+  }
+});
+
+test("manual AI execution completes checklist in MCP mode via HTTP transport", { concurrency: false }, async () => {
+  const workspace = setupWorkspace();
+  const mcp = await startFakeMcpServer();
+  const previousCwd = process.cwd();
+  process.chdir(workspace.root);
+  let server: http.Server | null = null;
+
+  try {
+    await withEnv(
+      {
+        QA_RUNNER_PLAYWRIGHT_PROJECT_DIR: "e2e/ui",
+        QA_RUNNER_PLAYWRIGHT_EXECUTION_MODE: "mcp",
+        QA_RUNNER_PLAYWRIGHT_MCP_TRANSPORT: "http",
+        QA_RUNNER_PLAYWRIGHT_MCP_URL: mcp.url,
+        QA_RUNNER_BASE_URL: "http://example.test",
+        E2E_EMAIL: "user@example.test",
+        E2E_PASSWORD: "correct-password",
+        FAKE_EXPECTED_PASSWORD: "correct-password",
+      },
+      async () => {
+        server = startDaemonServer({
+          port: 0,
+          daemonConfig: {
+            outputs: {
+              manualDir: workspace.casesDir,
+              e2eDir: workspace.e2eDir,
+              manifestPath: workspace.manifestPath,
+            },
+          },
+        });
+        await once(server, "listening");
+        const address = server.address();
+        assert.ok(address && typeof address === "object");
+        const baseUrl = `http://127.0.0.1:${address.port}`;
+        const runtime = await requestJson<{ executionMode: string }>(baseUrl, "/plugin/qa/runtime");
+        assert.equal(runtime.executionMode, "mcp");
+        const health = await requestJson<{
+          enabled: boolean;
+          transport: string;
+          endpoint: string;
+          lastStatus: string;
+        }>(baseUrl, "/plugin/qa/mcp/health?probe=1");
+        assert.equal(health.enabled, true);
+        assert.equal(health.transport, "http");
+        assert.equal(health.lastStatus, "healthy");
+        assert.match(health.endpoint, /\/mcp$/);
+
+        const suites = await requestJson<Array<{ id: string }>>(baseUrl, "/plugin/qa/suites");
+        assert.ok(suites.length > 0);
+        const run = await requestJson<{ id: string }>(baseUrl, "/plugin/qa/runs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ suiteId: suites[0]!.id, mode: "manual" }),
+        });
+        const started = await requestJson<{
+          executionJobId: string;
+          executionMode: string;
+          mcpTransport: string | null;
+          mcpEndpoint: string | null;
+        }>(baseUrl, `/plugin/qa/runs/${run.id}/manual/ai/execute`, { method: "POST" });
+        assert.equal(started.executionMode, "mcp");
+        assert.equal(started.mcpTransport, "http");
+        assert.ok(started.mcpEndpoint);
+
+        const finalStatus = await waitForTerminalManualStatus(baseUrl, run.id, started.executionJobId);
+        assert.equal(finalStatus.status, "completed");
+        assert.equal(finalStatus.failureReason, null);
+      },
+    );
+  } finally {
+    if (server) {
+      await closeServer(server);
+    }
+    await mcp.close();
     process.chdir(previousCwd);
     fs.rmSync(workspace.root, { recursive: true, force: true });
   }

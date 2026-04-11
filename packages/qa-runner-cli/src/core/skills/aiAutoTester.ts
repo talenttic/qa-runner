@@ -14,7 +14,7 @@ import { spawnSync } from "node:child_process";
 export type AiAutoTesterConfig = {
   confidenceThreshold?: number;
   environments?: string[];
-  executionMode?: "simulated" | "shell";
+  executionMode?: "simulated" | "shell" | "mcp";
   playwrightCommand?: string;
   workspaceRoot?: string;
   modelAdapter?: {
@@ -206,6 +206,14 @@ const buildExecutionResult = (plan: AiExecutionPlan): { mode: "simulated"; cases
     };
   });
   return { mode: "simulated", cases };
+};
+
+const buildMcpExecutionResult = (plan: AiExecutionPlan): { mode: "mcp"; cases: AiExecutionCaseResult[] } => {
+  const simulated = buildExecutionResult(plan);
+  return {
+    mode: "mcp",
+    cases: simulated.cases,
+  };
 };
 
 const runShellExecutor = (
@@ -414,12 +422,20 @@ export const createAiAutoTesterSkill = (config: AiAutoTesterConfig = {}): AiAuto
     const validationBase = buildAiValidationSignals(plan, threshold);
     const validation = attachVisualDiffSignals(plan, validationBase);
     const lowConfidenceCount = validation.filter((signal) => signal.belowThreshold).length;
-    const runtimeMode = config.executionMode ?? (process.env.QA_RUNNER_PLAYWRIGHT_EXECUTION_MODE === "shell" ? "shell" : "simulated");
+    const runtimeMode =
+      config.executionMode ??
+      (process.env.QA_RUNNER_PLAYWRIGHT_EXECUTION_MODE === "shell"
+        ? "shell"
+        : process.env.QA_RUNNER_PLAYWRIGHT_EXECUTION_MODE === "mcp"
+          ? "mcp"
+          : "simulated");
     const commandLine = config.playwrightCommand ?? process.env.QA_RUNNER_PLAYWRIGHT_COMMAND ?? "npx playwright test";
     const execution =
       runtimeMode === "shell"
         ? runShellExecutor(plan, commandLine, config.workspaceRoot ?? process.env.QA_RUNNER_WORKSPACE_ROOT)
-        : buildExecutionResult(plan);
+        : runtimeMode === "mcp"
+          ? buildMcpExecutionResult(plan)
+          : buildExecutionResult(plan);
     let generatedCode = renderPlaywrightScaffold(plan);
     if (config.modelAdapter) {
       const completion = await config.modelAdapter.generate(buildCodegenPrompt(plan), {
@@ -462,6 +478,8 @@ export const createAiAutoTesterSkill = (config: AiAutoTesterConfig = {}): AiAuto
           ? `${lowConfidenceCount} low-confidence steps detected; review ai-validation artifact for suggestions.`
           : execution.mode === "shell" && execution.exitCode !== 0
             ? "Shell execution completed with failures; inspect playwright output."
+            : execution.mode === "mcp"
+              ? "MCP execution plan prepared; use daemon manual AI MCP run for live browser execution."
             : "All interpreted steps met confidence threshold.",
     };
   },

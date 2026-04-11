@@ -91,6 +91,23 @@ const slugify = (input: string): string =>
     .replace(/(^-|-$)+/g, "")
     .slice(0, 80);
 
+const toPascalCaseIdentifier = (input: string): string => {
+  const parts = input
+    .replace(/[^a-zA-Z0-9]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1).toLowerCase()}`);
+  const candidate = parts.join("");
+  if (!candidate) {
+    return "GeneratedViewPage";
+  }
+  if (/^[0-9]/.test(candidate)) {
+    return `Generated${candidate}Page`;
+  }
+  return `${candidate}Page`;
+};
+
 const createId = (): string => crypto.randomBytes(6).toString("hex");
 
 const ensureDir = (filePath: string): void => {
@@ -153,7 +170,7 @@ export class QaRunnerDaemon {
             specPathForTest: (test) => path.join(this.config.outputs.e2eDir, `${test.featureKey}.spec.ts`),
             pageObjectPathForTest: (test) => path.join(this.config.outputs.e2eDir, "pages", `${test.featureKey}.page.ts`),
             pageObjectImportPathForSpec: (test) => `./pages/${test.featureKey}.page`,
-            classNameForTest: (test) => `${slugify(test.featureKey)}Page`.replace(/(^[a-z])/, (m) => m.toUpperCase()),
+            classNameForTest: (test) => toPascalCaseIdentifier(test.featureKey),
           })
         : undefined;
 

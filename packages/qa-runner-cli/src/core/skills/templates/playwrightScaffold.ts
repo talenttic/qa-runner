@@ -23,7 +23,8 @@ function renderPageObjectClass(input: {
   lines.push("  }");
   lines.push("");
   lines.push("  async open(): Promise<void> {");
-  lines.push("    await this.page.goto(\"/\");");
+  lines.push("    const targetPath = process.env.QA_RUNNER_TEST_ENTRY_PATH || \"/\";");
+  lines.push("    await this.page.goto(targetPath);");
   lines.push("  }");
   lines.push("}");
   lines.push("");

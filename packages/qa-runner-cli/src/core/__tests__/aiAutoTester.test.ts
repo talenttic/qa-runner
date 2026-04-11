@@ -88,6 +88,28 @@ test("createAiAutoTesterSkill shell mode reflects command exit status", async ()
   assert.equal(result.execution?.exitCode, 0);
 });
 
+test("createAiAutoTesterSkill mcp mode returns mcp execution metadata", async () => {
+  const skill = createAiAutoTesterSkill({
+    executionMode: "mcp",
+  });
+  const result = await skill.executeAutoTest({
+    suiteName: "McpRun",
+    environment: "stage",
+    cases: [
+      {
+        title: "MCP execution",
+        useCase: "runtime",
+        expectedResult: "ok",
+        priority: "medium",
+        steps: ["Click run", "Verify result"],
+      },
+    ],
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(result.execution?.mode, "mcp");
+});
+
 test("createAiAutoTesterSkill uses model adapter output when provided", async () => {
   const skill = createAiAutoTesterSkill({
     modelAdapter: {

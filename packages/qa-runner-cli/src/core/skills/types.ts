@@ -57,9 +57,16 @@ export type SkillsConfig = {
   aiAutoTester?: SkillToggle & {
     confidenceThreshold?: number;
     environments?: string[];
-    executionMode?: "simulated" | "shell";
+    executionMode?: "simulated" | "shell" | "mcp";
     playwrightCommand?: string;
     workspaceRoot?: string;
+    mcp?: {
+      transport?: "http" | "stdio";
+      url?: string;
+      command?: string;
+      args?: string[];
+      timeoutMs?: number;
+    };
   };
   flakinessDetector?: SkillToggle & {
     unstableThreshold?: number;
@@ -168,7 +175,7 @@ export type AiAutoTesterResult = {
   success: boolean;
   plan?: AiExecutionPlan;
   execution?: {
-    mode: "simulated" | "shell";
+    mode: "simulated" | "shell" | "mcp";
     command?: string;
     exitCode?: number;
     cases: AiExecutionCaseResult[];
