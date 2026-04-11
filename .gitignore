@@ -1,5 +1,6 @@
 # dependencies
 node_modules/
+fixtures/**/node_modules/
 
 # OS files
 .DS_Store
@@ -7,6 +8,7 @@ node_modules/
 # env
 .env
 .env.*
+!.env.example
 
 # build artifacts
 coverage/
@@ -29,11 +31,25 @@ tools/qa-runner.manifest.json
 tools/qa-runner.manifest.baseline.json
 tools/qa-runner.report.json
 tools/qa-runner.kpi-report.json
+.playwright-mcp/
+test-results/
+.tmp/
 
 # qa-runner generated outputs
-docs/qa-cases/*__qa-generated.md
-e2e/generated/
 e2e/generated/*.ai-execution-plan.json
 e2e/generated/*.ai-execution-result.json
 e2e/generated/*.ai-validation.json
 e2e/generated/*.ai-generated.spec.ts
+
+# fixture runtime artifacts
+fixtures/**/.qa-runner-heal-once.marker
+fixtures/**/tools/qa-runner.db
+fixtures/**/tools/qa-runner.manifest.json
+fixtures/**/tools/qa-runner.report.json
+fixtures/**/tools/qa-runner.kpi-report.json
+fixtures/**/tools/.qa-runner/
+fixtures/**/e2e/generated/
+fixtures/**/e2e/ui/test-results/
+fixtures/**/docs/qa-cases/*__qa-generated.md
+fixtures/**/package-lock.json
+fixtures/**/e2e/ui/package-lock.json
