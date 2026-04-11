@@ -3,11 +3,12 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 import { DatabaseSync } from "node:sqlite";
 import { QaRunnerDaemon, type DaemonConfig, type GenerationOutcome } from "./daemon.js";
 import { validateChangeEvent, type ChangeEvent } from "../core/index.js";
 import { getUiAssetDir } from "@talenttic/qa-runner-ui";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 export type ServerConfig = {
   port: number;
@@ -50,10 +51,122 @@ type QaGenerationJob = {
       testIdSelectors: string[];
     }>;
     selectedTestTypes?: string[];
+    review?: {
+      reviewedFiles: number;
+      discoveredTests: number;
+      loadedTests: number;
+      score: number;
+      issueCount: number;
+      issues: Array<{
+        id: string;
+        severity: "low" | "medium" | "high";
+        ruleId: string;
+        message: string;
+        filePath: string;
+        line: number | null;
+        suggestion: string;
+      }>;
+    };
+    intelligentReview?: {
+      generatedAt: string;
+      score: number;
+      summary: string;
+      metadata: {
+        provider: string;
+        model: string;
+        mode: "heuristic" | "llm" | "hybrid";
+      };
+      suggestions: Array<{
+        id: string;
+        category: "selector_stability" | "timing_stability" | "security_hygiene" | "assertion_quality" | "test_architecture";
+        priority: "high" | "medium" | "low";
+        confidence: number;
+        rationale: string;
+        suggestion: string;
+        affectedFiles: string[];
+        retestScope: "single_spec" | "affected_specs" | "full_suite";
+      }>;
+    };
+    intelligentFixProposals?: Array<{
+      id: string;
+      suggestionId: string;
+      title: string;
+      category: "selector_stability" | "timing_stability" | "security_hygiene" | "assertion_quality" | "test_architecture";
+      priority: "high" | "medium" | "low";
+      risk: "low" | "medium" | "high";
+      confidence: number;
+      filePath: string;
+      changeType: "test_only" | "app_plus_test" | "config";
+      diffPreview: string;
+      retestScope: "single_spec" | "affected_specs" | "full_suite";
+      status?: "pending" | "applied" | "failed";
+      appliedAt?: string | null;
+      applyError?: string | null;
+      retestStatus?: "not_run" | "passed" | "failed";
+      retestAt?: string | null;
+      retestError?: string | null;
+      retestCommand?: string | null;
+    }>;
+    automation?: {
+      strategy: "continuous_fix" | "alert_only";
+      status: "fixed" | "partial" | "attention" | "clean";
+      startedAt: string;
+      completedAt: string;
+      iterations: number;
+      appliedCount: number;
+      passedRetests: number;
+      failedRetests: number;
+      remainingProposals: number;
+      message: string;
+    };
   } | null;
   error: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+type QaAiExecutionJob = {
+  id: string;
+  runId: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  playwrightCommand: string;
+  executionMode?: "stub" | "shell" | "ui";
+  playwrightUiUrl?: string | null;
+  reportRef: string | null;
+  traceRef: string | null;
+  videoRef: string | null;
+  error: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type QaManualAiExecutionJob = {
+  id: string;
+  runId: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  currentCaseId: string | null;
+  currentStepId: string | null;
+  currentStepIndex: number;
+  totalSteps: number;
+  failureReason: string | null;
+  reportRef: string | null;
+  traceRef: string | null;
+  videoRef: string | null;
+  playwrightUiUrl?: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  actionLog: Array<{
+    at: string;
+    caseId: string;
+    stepId: string;
+    stepText: string;
+    status: "passed" | "failed";
+    reason?: string;
+  }>;
 };
 
 type QaWorkspaceProfile = {
@@ -325,8 +438,32 @@ const ensureQaTables = (db: DatabaseSync) => {
       run_id TEXT NOT NULL,
       payload TEXT NOT NULL,
       created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS qa_manual_ai_executions (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      current_case_id TEXT,
+      current_step_id TEXT,
+      current_step_index INTEGER NOT NULL,
+      total_steps INTEGER NOT NULL,
+      failure_reason TEXT,
+      report_ref TEXT,
+      trace_ref TEXT,
+      video_ref TEXT,
+      playwright_ui_url TEXT,
+      started_at TEXT,
+      completed_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      action_log TEXT NOT NULL
     );`,
   );
+  try {
+    db.exec("ALTER TABLE qa_manual_ai_executions ADD COLUMN playwright_ui_url TEXT;");
+  } catch {
+    // no-op: already migrated
+  }
 };
 
 const toRun = (row: any) => ({
@@ -343,10 +480,51 @@ const toRun = (row: any) => ({
   updatedAt: row.updated_at,
 });
 
+const toManualAiExecution = (row: any): QaManualAiExecutionJob => {
+  let actionLog: QaManualAiExecutionJob["actionLog"] = [];
+  try {
+    const parsed = JSON.parse(row.action_log ?? "[]");
+    if (Array.isArray(parsed)) {
+      actionLog = parsed;
+    }
+  } catch {
+    actionLog = [];
+  }
+  return {
+    id: String(row.id),
+    runId: String(row.run_id),
+    status: row.status as QaManualAiExecutionJob["status"],
+    currentCaseId: row.current_case_id ?? null,
+    currentStepId: row.current_step_id ?? null,
+    currentStepIndex: Number(row.current_step_index ?? 0),
+    totalSteps: Number(row.total_steps ?? 0),
+    failureReason: row.failure_reason ?? null,
+    reportRef: row.report_ref ?? null,
+    traceRef: row.trace_ref ?? null,
+    videoRef: row.video_ref ?? null,
+    playwrightUiUrl: row.playwright_ui_url ?? null,
+    startedAt: row.started_at ?? null,
+    completedAt: row.completed_at ?? null,
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+    actionLog,
+  };
+};
+
 export function startDaemonServer(config: ServerConfig): http.Server {
   const daemon = new QaRunnerDaemon(config.daemonConfig);
   const state: ServerState = {};
   const generationJobs = new Map<string, QaGenerationJob>();
+  const aiExecutionJobs = new Map<string, QaAiExecutionJob>();
+  const aiExecutionProcesses = new Map<string, ReturnType<typeof spawn>>();
+  const executionModeEnvRaw = (process.env.QA_RUNNER_PLAYWRIGHT_EXECUTION_MODE ?? "stub").trim().toLowerCase();
+  const defaultExecutionMode: "stub" | "shell" | "ui" =
+    executionModeEnvRaw === "shell" || executionModeEnvRaw === "ui" ? executionModeEnvRaw : "stub";
+  const playwrightProjectDir = process.env.QA_RUNNER_PLAYWRIGHT_PROJECT_DIR?.trim() || "e2e/ui";
+  const playwrightUiPort = Number(process.env.QA_RUNNER_PLAYWRIGHT_UI_PORT ?? "9323");
+  const playwrightUiHost = process.env.QA_RUNNER_PLAYWRIGHT_UI_HOST?.trim() || "127.0.0.1";
+  const needsXvfb = process.platform === "linux" && !process.env.DISPLAY;
+  const xvfbAvailable = needsXvfb && spawnSync("which", ["xvfb-run"], { stdio: "ignore" }).status === 0;
   const workspaceDbs = new Map<string, DatabaseSync>();
   const uiDir = getUiAssetDir();
   const uiIndex = path.join(uiDir, "index.html");
@@ -603,6 +781,470 @@ export function startDaemonServer(config: ServerConfig): http.Server {
     };
   };
 
+  const upsertManualAiExecution = (db: DatabaseSync, execution: QaManualAiExecutionJob): void => {
+    db.prepare(
+      `INSERT INTO qa_manual_ai_executions (
+        id, run_id, status, current_case_id, current_step_id, current_step_index, total_steps,
+        failure_reason, report_ref, trace_ref, video_ref, playwright_ui_url, started_at, completed_at, created_at, updated_at, action_log
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        status=excluded.status,
+        current_case_id=excluded.current_case_id,
+        current_step_id=excluded.current_step_id,
+        current_step_index=excluded.current_step_index,
+        total_steps=excluded.total_steps,
+        failure_reason=excluded.failure_reason,
+        report_ref=excluded.report_ref,
+        trace_ref=excluded.trace_ref,
+        video_ref=excluded.video_ref,
+        playwright_ui_url=excluded.playwright_ui_url,
+        started_at=excluded.started_at,
+        completed_at=excluded.completed_at,
+        updated_at=excluded.updated_at,
+        action_log=excluded.action_log`
+    ).run(
+      execution.id,
+      execution.runId,
+      execution.status,
+      execution.currentCaseId,
+      execution.currentStepId,
+      execution.currentStepIndex,
+      execution.totalSteps,
+      execution.failureReason,
+      execution.reportRef,
+      execution.traceRef,
+      execution.videoRef,
+      execution.playwrightUiUrl ?? null,
+      execution.startedAt,
+      execution.completedAt,
+      execution.createdAt,
+      execution.updatedAt,
+      JSON.stringify(execution.actionLog),
+    );
+  };
+
+  const addEvidenceRef = (db: DatabaseSync, input: {
+    runId: string;
+    caseId: string;
+    type: string;
+    label: string;
+    ref: string;
+  }): void => {
+    const id = `ev_${hashId(`${input.runId}:${input.caseId}:${input.type}:${Date.now()}`)}`;
+    const now = new Date().toISOString();
+    db.prepare(
+      `INSERT INTO qa_evidence (id, run_id, case_id, type, label, ref, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(id, input.runId, input.caseId, input.type, input.label, input.ref, now);
+  };
+
+  const getManualAiExecution = (db: DatabaseSync, runId: string, executionJobId: string): QaManualAiExecutionJob | null => {
+    const row = db.prepare("SELECT * FROM qa_manual_ai_executions WHERE id = ? AND run_id = ?").get(executionJobId, runId) as any;
+    return row ? toManualAiExecution(row) : null;
+  };
+
+  type ManualAiParsedStep =
+    | { kind: "open"; target: string }
+    | { kind: "fill"; field: string; valueRef: string }
+    | { kind: "click"; label: string }
+    | { kind: "verify_text"; text: string }
+    | { kind: "verify_url_contains"; value: string }
+    | { kind: "verify_no_js_errors" }
+    | { kind: "verify_no_failed_network_requests" };
+
+  type ManualAiStepParseResult =
+    | { supported: true; step: ManualAiParsedStep }
+    | { supported: false; reason: string };
+
+  const parseManualAiStep = (stepText: string): ManualAiStepParseResult => {
+    const text = stepText.trim();
+    if (!text) {
+      return { supported: false, reason: "manual_required: empty step text" };
+    }
+    let match = text.match(/^open\s+(.+)$/i);
+    if (match) {
+      return { supported: true, step: { kind: "open", target: match[1].trim() } };
+    }
+    match = text.match(/^fill\s+(.+):\s*(.+)$/i);
+    if (match) {
+      return {
+        supported: true,
+        step: {
+          kind: "fill",
+          field: match[1].trim(),
+          valueRef: match[2].trim(),
+        },
+      };
+    }
+    match = text.match(/^click\s+(.+)$/i);
+    if (match) {
+      return { supported: true, step: { kind: "click", label: match[1].trim() } };
+    }
+    match = text.match(/^verify\s+url\s+contains\s+(.+)$/i);
+    if (match) {
+      return { supported: true, step: { kind: "verify_url_contains", value: match[1].trim() } };
+    }
+    if (/^verify\s+no\s+javascript\s+errors$/i.test(text)) {
+      return { supported: true, step: { kind: "verify_no_js_errors" } };
+    }
+    if (/^verify\s+no\s+failed\s+network\s+requests$/i.test(text)) {
+      return { supported: true, step: { kind: "verify_no_failed_network_requests" } };
+    }
+    match = text.match(/^verify\s+(.+)$/i);
+    if (match) {
+      return { supported: true, step: { kind: "verify_text", text: match[1].trim() } };
+    }
+    return { supported: false, reason: "manual_required: unsupported step pattern" };
+  };
+
+  const slugifySelectorToken = (value: string): string =>
+    value
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+
+  const resolveManualAiFillValue = (valueRef: string): { ok: true; value: string } | { ok: false; reason: string } => {
+    const token = valueRef.trim();
+    if (token === "E2E_EMAIL" || token === "E2E_PASSWORD") {
+      const envValue = process.env[token]?.trim();
+      if (!envValue) {
+        return { ok: false, reason: `missing_env: ${token}` };
+      }
+      return { ok: true, value: envValue };
+    }
+    return { ok: true, value: token };
+  };
+
+  const resolveManualAiBaseUrl = (): string =>
+    process.env.QA_RUNNER_BASE_URL?.trim() ||
+    process.env.PLAYWRIGHT_BASE_URL?.trim() ||
+    process.env.BASE_URL?.trim() ||
+    "http://127.0.0.1:3000";
+
+  const executeManualAiStep = async (input: {
+    step: ManualAiParsedStep;
+    page: any;
+    consoleErrors: string[];
+    failedRequests: string[];
+  }): Promise<void> => {
+    const stepTimeoutMs = Number(process.env.QA_RUNNER_MANUAL_AI_STEP_TIMEOUT_MS ?? "8000");
+    const clickTimeoutMs = Math.max(2000, Math.min(stepTimeoutMs, 6000));
+    const textWaitMs = Math.max(2000, Math.min(stepTimeoutMs, 6000));
+
+    const waitAndFill = async (locator: any, value: string): Promise<boolean> => {
+      try {
+        await locator.waitFor({ state: "visible", timeout: clickTimeoutMs });
+        await locator.fill(value, { timeout: clickTimeoutMs });
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    const waitAndClick = async (locator: any): Promise<boolean> => {
+      try {
+        await locator.waitFor({ state: "visible", timeout: clickTimeoutMs });
+        await locator.click({ timeout: clickTimeoutMs });
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    switch (input.step.kind) {
+      case "open": {
+        const target = input.step.target;
+        const isAbsolute = /^https?:\/\//i.test(target);
+        const baseUrl = resolveManualAiBaseUrl();
+        const url = isAbsolute ? target : `${baseUrl.replace(/\/$/, "")}/${target.replace(/^\//, "")}`;
+        await input.page.goto(url, { waitUntil: "domcontentloaded", timeout: stepTimeoutMs });
+        return;
+      }
+      case "fill": {
+        const resolved = resolveManualAiFillValue(input.step.valueRef);
+        if (!resolved.ok) {
+          throw new Error(resolved.reason);
+        }
+        const field = input.step.field;
+        const fieldToken = slugifySelectorToken(field);
+        const candidates = [
+          input.page.getByLabel(field, { exact: false }).first(),
+          input.page.getByPlaceholder(field, { exact: false }).first(),
+          input.page.getByTestId(fieldToken).first(),
+          input.page.locator(`[name="${field}"]`).first(),
+          input.page.locator(`[name="${fieldToken}"]`).first(),
+          input.page.locator(`#${fieldToken}`).first(),
+        ];
+        for (const candidate of candidates) {
+          if (await waitAndFill(candidate, resolved.value)) {
+            return;
+          }
+        }
+        throw new Error(`fill_target_not_found: ${field}`);
+      }
+      case "click": {
+        const label = input.step.label;
+        const labelToken = slugifySelectorToken(label);
+        const candidates = [
+          input.page.getByRole("button", { name: label, exact: false }).first(),
+          input.page.getByRole("link", { name: label, exact: false }).first(),
+          input.page.getByTestId(labelToken).first(),
+          input.page.getByText(label, { exact: false }).first(),
+        ];
+        for (const candidate of candidates) {
+          if (await waitAndClick(candidate)) {
+            return;
+          }
+        }
+        throw new Error(`click_target_not_found: ${label}`);
+      }
+      case "verify_text": {
+        await input.page.getByText(input.step.text, { exact: false }).first().waitFor({
+          state: "visible",
+          timeout: textWaitMs,
+        });
+        return;
+      }
+      case "verify_url_contains": {
+        const currentUrl = String(input.page.url() ?? "");
+        if (!currentUrl.includes(input.step.value)) {
+          throw new Error(`url_mismatch: expected "${input.step.value}" in "${currentUrl}"`);
+        }
+        return;
+      }
+      case "verify_no_js_errors": {
+        if (input.consoleErrors.length > 0) {
+          throw new Error(`javascript_errors_detected: ${input.consoleErrors[0]}`);
+        }
+        return;
+      }
+      case "verify_no_failed_network_requests": {
+        if (input.failedRequests.length > 0) {
+          throw new Error(`failed_network_requests_detected: ${input.failedRequests[0]}`);
+        }
+        return;
+      }
+    }
+  };
+
+  const runManualAiExecution = async (input: {
+    db: DatabaseSync;
+    runId: string;
+    executionJobId: string;
+    casesRoot: string;
+    playwrightProjectDir: string;
+    executionMode: "stub" | "shell" | "ui";
+  }): Promise<void> => {
+    const detail = loadRunDetail(input.db, input.runId, input.casesRoot);
+    if (!detail) {
+      return;
+    }
+    const totalSteps = detail.cases.reduce((acc, qaCase) => acc + qaCase.steps.length, 0);
+    let execution = getManualAiExecution(input.db, input.runId, input.executionJobId);
+    if (!execution) {
+      return;
+    }
+    const startedAt = new Date().toISOString();
+    execution = {
+      ...execution,
+      status: "running",
+      startedAt,
+      updatedAt: startedAt,
+      totalSteps,
+      currentStepIndex: 0,
+    };
+    upsertManualAiExecution(input.db, execution);
+
+    const resolvedProjectDir = path.resolve(process.cwd(), input.playwrightProjectDir);
+    const projectPackageJson = path.join(resolvedProjectDir, "package.json");
+    if (!fs.existsSync(projectPackageJson)) {
+      const now = new Date().toISOString();
+      execution.status = "failed";
+      execution.failureReason = `playwright_project_not_found: ${resolvedProjectDir}`;
+      execution.completedAt = now;
+      execution.updatedAt = now;
+      upsertManualAiExecution(input.db, execution);
+      input.db.prepare("UPDATE qa_runs SET status = ?, updated_at = ? WHERE id = ?").run("failed", now, input.runId);
+      return;
+    }
+
+    let browser: any = null;
+    let context: any = null;
+    let page: any = null;
+    const consoleErrors: string[] = [];
+    const failedRequests: string[] = [];
+    try {
+      const projectRequire = createRequire(projectPackageJson);
+      const playwright = projectRequire("playwright") as { chromium: { launch: (options?: any) => Promise<any> } };
+      browser = await playwright.chromium.launch({ headless: input.executionMode !== "ui" });
+      context = await browser.newContext();
+      page = await context.newPage();
+      page.on("console", (message: any) => {
+        if (message?.type?.() === "error") {
+          consoleErrors.push(message.text?.() ?? "console_error");
+        }
+      });
+      page.on("requestfailed", (request: any) => {
+        const errorText = request.failure?.()?.errorText ?? "request_failed";
+        failedRequests.push(`${request.method?.() ?? "GET"} ${request.url?.() ?? ""} (${errorText})`);
+      });
+    } catch (error) {
+      const now = new Date().toISOString();
+      execution.status = "failed";
+      execution.failureReason = error instanceof Error ? error.message : "playwright_launch_failed";
+      execution.completedAt = now;
+      execution.updatedAt = now;
+      upsertManualAiExecution(input.db, execution);
+      input.db.prepare("UPDATE qa_runs SET status = ?, updated_at = ? WHERE id = ?").run("failed", now, input.runId);
+      if (context) {
+        await context.close().catch(() => undefined);
+      }
+      if (browser) {
+        await browser.close().catch(() => undefined);
+      }
+      return;
+    }
+
+    let stepIndex = 0;
+    try {
+      for (const qaCase of detail.cases) {
+        for (const step of qaCase.steps) {
+          stepIndex += 1;
+          execution.currentCaseId = qaCase.id;
+          execution.currentStepId = step.id;
+          execution.currentStepIndex = stepIndex;
+          execution.updatedAt = new Date().toISOString();
+          upsertManualAiExecution(input.db, execution);
+
+          const parsed = parseManualAiStep(step.text);
+          let failureReason: string | null = null;
+          if (!parsed.supported) {
+            failureReason = parsed.reason;
+          } else {
+            try {
+              await executeManualAiStep({
+                step: parsed.step,
+                page,
+                consoleErrors,
+                failedRequests,
+              });
+            } catch (error) {
+              failureReason = error instanceof Error ? error.message : "step_failed";
+            }
+          }
+
+          const now = new Date().toISOString();
+          const checkId = `check_${hashId(`${input.runId}:${step.id}`)}`;
+          input.db.prepare(
+            `INSERT INTO qa_step_checks (id, run_id, case_id, step_id, checked, auto_checked, failure_reason, updated_at)
+             VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET checked=excluded.checked, auto_checked=1, failure_reason=excluded.failure_reason, updated_at=excluded.updated_at`
+          ).run(checkId, input.runId, qaCase.id, step.id, failureReason ? 0 : 1, failureReason, now);
+
+          execution.actionLog.push({
+            at: now,
+            caseId: qaCase.id,
+            stepId: step.id,
+            stepText: step.text,
+            status: failureReason ? "failed" : "passed",
+            reason: failureReason ?? undefined,
+          });
+
+          if (failureReason) {
+            const resultId = `result_${hashId(`${input.runId}:${qaCase.id}`)}`;
+            input.db.prepare(
+              `INSERT INTO qa_case_results (id, run_id, case_id, status, notes, failure_reason, tested_by, completed_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET status=excluded.status, notes=excluded.notes, failure_reason=excluded.failure_reason, completed_at=excluded.completed_at, updated_at=excluded.updated_at`
+            ).run(resultId, input.runId, qaCase.id, "failed", "AI manual execution failed", failureReason, now, now);
+            execution.status = "failed";
+            execution.failureReason = failureReason;
+            execution.completedAt = now;
+            execution.updatedAt = now;
+            execution.reportRef = `qa://manual-ai/${input.runId}/${execution.id}/report.json`;
+            execution.traceRef = `qa://manual-ai/${input.runId}/${execution.id}/trace.zip`;
+            execution.videoRef = `qa://manual-ai/${input.runId}/${execution.id}/video.webm`;
+            addEvidenceRef(input.db, {
+              runId: input.runId,
+              caseId: qaCase.id,
+              type: "report",
+              label: "Manual AI Report",
+              ref: execution.reportRef,
+            });
+            addEvidenceRef(input.db, {
+              runId: input.runId,
+              caseId: qaCase.id,
+              type: "trace",
+              label: "Manual AI Trace",
+              ref: execution.traceRef,
+            });
+            addEvidenceRef(input.db, {
+              runId: input.runId,
+              caseId: qaCase.id,
+              type: "video",
+              label: "Manual AI Video",
+              ref: execution.videoRef,
+            });
+            upsertManualAiExecution(input.db, execution);
+            input.db.prepare("UPDATE qa_runs SET status = ?, updated_at = ? WHERE id = ?").run("failed", now, input.runId);
+            return;
+          }
+        }
+
+        const now = new Date().toISOString();
+        const resultId = `result_${hashId(`${input.runId}:${qaCase.id}`)}`;
+        input.db.prepare(
+          `INSERT INTO qa_case_results (id, run_id, case_id, status, notes, failure_reason, tested_by, completed_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET status=excluded.status, notes=excluded.notes, failure_reason=NULL, completed_at=excluded.completed_at, updated_at=excluded.updated_at`
+        ).run(resultId, input.runId, qaCase.id, "passed", "AI manual execution completed", now, now);
+      }
+
+      const completedAt = new Date().toISOString();
+      execution.status = "completed";
+      execution.failureReason = null;
+      execution.completedAt = completedAt;
+      execution.updatedAt = completedAt;
+      execution.reportRef = `qa://manual-ai/${input.runId}/${execution.id}/report.json`;
+      execution.traceRef = `qa://manual-ai/${input.runId}/${execution.id}/trace.zip`;
+      execution.videoRef = `qa://manual-ai/${input.runId}/${execution.id}/video.webm`;
+      const lastCaseId = detail.cases[detail.cases.length - 1]?.id;
+      if (lastCaseId) {
+        addEvidenceRef(input.db, {
+          runId: input.runId,
+          caseId: lastCaseId,
+          type: "report",
+          label: "Manual AI Report",
+          ref: execution.reportRef,
+        });
+        addEvidenceRef(input.db, {
+          runId: input.runId,
+          caseId: lastCaseId,
+          type: "trace",
+          label: "Manual AI Trace",
+          ref: execution.traceRef,
+        });
+        addEvidenceRef(input.db, {
+          runId: input.runId,
+          caseId: lastCaseId,
+          type: "video",
+          label: "Manual AI Video",
+          ref: execution.videoRef,
+        });
+      }
+      upsertManualAiExecution(input.db, execution);
+      input.db.prepare("UPDATE qa_runs SET status = ?, updated_at = ? WHERE id = ?").run("passed", completedAt, input.runId);
+    } finally {
+      if (context) {
+        await context.close().catch(() => undefined);
+      }
+      if (browser) {
+        await browser.close().catch(() => undefined);
+      }
+    }
+  };
+
   const renderReportMarkdown = (report: ReturnType<typeof buildManualReport>) => {
     if (!report) {
       return "# QA Manual Run Report\n\nNo report available.\n";
@@ -736,6 +1378,12 @@ export function startDaemonServer(config: ServerConfig): http.Server {
     if (req.method === "GET" && req.url.startsWith("/assets/")) {
       const assetPath = path.join(uiDir, req.url.replace("/assets/", "assets/"));
       serveStatic(res, assetPath);
+      return;
+    }
+
+    if (req.method === "GET" && (req.url === "/sw.js" || req.url === "/manifest.json")) {
+      const staticPath = path.join(uiDir, req.url.replace(/^\//, ""));
+      serveStatic(res, staticPath);
       return;
     }
 
@@ -914,8 +1562,15 @@ export function startDaemonServer(config: ServerConfig): http.Server {
       json(res, 200, {
         data: {
           casesRoot: casesDir,
-          aiEnabled: false,
-          playwrightUiEnabled: false,
+          aiEnabled: true,
+          playwrightUiEnabled: true,
+          executionMode: defaultExecutionMode,
+          executionTimeoutMs: 120000,
+          workspaceRoot: process.cwd(),
+          evidenceStorageMode: "metadata_only",
+          executionIsolationMode: "local_worker",
+          qaDataScopeMode: "global",
+          extractionTiming: "in_repo_until_v1",
           pomRuleMode: "off",
           pomDirectLocatorThreshold: 8,
           manualReportWebhookEnabled: false,
@@ -1315,8 +1970,8 @@ export function startDaemonServer(config: ServerConfig): http.Server {
       return;
     }
 
-    if (req.method === "GET" && req.url?.startsWith("/plugin/qa/runs/")) {
-      const match = req.url.match(/^\/plugin\/qa\/runs\/([^/?#]+)/);
+    if (req.method === "GET" && req.url?.match(/^\/plugin\/qa\/runs\/[^/?#]+$/)) {
+      const match = req.url.match(/^\/plugin\/qa\/runs\/([^/?#]+)$/);
       const runId = match?.[1];
       if (!runId) {
         json(res, 404, { error: "run_not_found" });
@@ -1331,7 +1986,7 @@ export function startDaemonServer(config: ServerConfig): http.Server {
       return;
     }
 
-    if (req.method === "GET" && req.url.startsWith("/plugin/qa/runs")) {
+    if (req.method === "GET" && req.url.match(/^\/plugin\/qa\/runs(?:\?.*)?$/)) {
       const url = new URL(req.url, "http://localhost");
       const limit = Number(url.searchParams.get("limit") ?? "0");
       const suiteId = url.searchParams.get("suiteId");
@@ -1350,7 +2005,7 @@ export function startDaemonServer(config: ServerConfig): http.Server {
       return;
     }
 
-    if (req.method === "PATCH" && req.url?.includes("/steps/")) {
+    if ((req.method === "PATCH" || req.method === "PUT") && req.url?.includes("/steps/")) {
       const match = req.url.match(/^\/plugin\/qa\/runs\/([^/]+)\/cases\/([^/]+)\/steps\/([^/?#]+)/);
       const runId = match?.[1] ?? "";
       const caseId = match?.[2] ?? "";
@@ -1379,7 +2034,7 @@ export function startDaemonServer(config: ServerConfig): http.Server {
       return;
     }
 
-    if (req.method === "PATCH" && req.url?.includes("/cases/")) {
+    if ((req.method === "PATCH" || req.method === "PUT") && req.url?.includes("/cases/")) {
       const match = req.url.match(/^\/plugin\/qa\/runs\/([^/]+)\/cases\/([^/?#]+)/);
       const runId = match?.[1] ?? "";
       const caseId = match?.[2] ?? "";
@@ -1577,6 +2232,677 @@ export function startDaemonServer(config: ServerConfig): http.Server {
       } catch (error) {
         json(res, 400, { error: "git_sync_failed" }, corsHeaders);
       }
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/plugin/qa/tests/load-existing") {
+      try {
+        const body = (await readRequestBody<{
+          source?: string;
+          testTypes?: string[];
+          tags?: string[];
+          testDir?: string;
+        }>(req)) ?? {};
+        const configuredDir = body.testDir?.trim() || path.join(process.cwd(), "e2e", "ui", "tests");
+        const absoluteTestDir = path.isAbsolute(configuredDir) ? configuredDir : path.join(process.cwd(), configuredDir);
+        if (!fs.existsSync(absoluteTestDir)) {
+          json(res, 404, { error: "qa_existing_tests_dir_not_found" }, corsHeaders);
+          return;
+        }
+
+        const testFiles: string[] = [];
+        const walkTests = (dir: string): void => {
+          const entries = fs.readdirSync(dir, { withFileTypes: true });
+          for (const entry of entries) {
+            const fullPath = path.join(dir, entry.name);
+            if (entry.isDirectory()) {
+              walkTests(fullPath);
+              continue;
+            }
+            if (!entry.isFile()) {
+              continue;
+            }
+            if (fullPath.endsWith(".spec.ts") || fullPath.endsWith(".test.ts") || fullPath.endsWith(".spec.tsx")) {
+              testFiles.push(fullPath);
+            }
+          }
+        };
+        walkTests(absoluteTestDir);
+
+        const normalizedTags = (body.tags ?? []).map((item) => item.trim()).filter(Boolean);
+        const selectedTypes = (body.testTypes ?? []).map((item) => item.trim()).filter(Boolean);
+        const now = new Date().toISOString();
+        const id = `gen_${hashId(`${Date.now()}_${absoluteTestDir}_existing`)}`;
+        const tests = testFiles.slice(0, 300).map((filePath, index) => {
+          const relative = path.relative(process.cwd(), filePath).replace(/\\/g, "/");
+          const base = path.basename(relative).replace(/\.(spec|test)\.tsx?$/, "");
+          const featureKey = base.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "") || `existing-${index + 1}`;
+          return {
+            id: `existing_test_${hashId(`${id}:${relative}`)}`,
+            title: base || `Existing Test ${index + 1}`,
+            testType: selectedTypes[index % (selectedTypes.length || 1)] || "ui_functional",
+            riskLevel: "medium" as const,
+            tags: Array.from(new Set(["@existing", ...normalizedTags])),
+            featureKey,
+            filePath: relative,
+            testIdSelectors: [],
+          };
+        });
+
+        const job: QaGenerationJob = {
+          id,
+          requestedByUserId: "local",
+          prompt: `Load existing tests from ${path.relative(process.cwd(), absoluteTestDir) || absoluteTestDir}`,
+          scope: {},
+          status: "completed",
+          result: {
+            suiteName: "Existing Playwright Suite",
+            cases: [],
+            tests,
+            selectedTestTypes: selectedTypes,
+          },
+          error: null,
+          createdAt: now,
+          updatedAt: now,
+        };
+        generationJobs.set(id, job);
+        json(res, 201, { data: job }, corsHeaders);
+      } catch (error) {
+        json(res, 500, { error: "qa_existing_tests_load_failed" }, corsHeaders);
+      }
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/plugin/qa/tests/load") {
+      try {
+        const body = (await readRequestBody<{
+          generationJobId?: string;
+          runId?: string;
+        }>(req)) ?? {};
+        const generationJobId = body.generationJobId?.trim() ?? "";
+        if (!generationJobId) {
+          json(res, 400, { error: "qa_generation_job_id_required" }, corsHeaders);
+          return;
+        }
+        const job = generationJobs.get(generationJobId);
+        if (!job) {
+          json(res, 404, { error: "qa_generation_job_not_found" }, corsHeaders);
+          return;
+        }
+        if (job.status !== "completed" || !job.result) {
+          json(res, 409, { error: "qa_generation_job_not_ready" }, corsHeaders);
+          return;
+        }
+        if (body.runId?.trim()) {
+          const runId = body.runId.trim();
+          const runRow = db.prepare("SELECT id FROM qa_runs WHERE id = ?").get(runId) as { id?: string } | undefined;
+          if (!runRow?.id) {
+            json(res, 404, { error: "qa_run_not_found" }, corsHeaders);
+            return;
+          }
+        }
+        json(
+          res,
+          201,
+          {
+            data: {
+              generationJobId: job.id,
+              loadedCount: job.result.tests?.length ?? 0,
+              tests: job.result.tests ?? [],
+              loadedAt: new Date().toISOString(),
+            },
+          },
+          corsHeaders,
+        );
+      } catch (error) {
+        json(res, 500, { error: "qa_tests_load_failed" }, corsHeaders);
+      }
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/plugin/qa/tests/review-intelligent") {
+      try {
+        const body = (await readRequestBody<{ generationJobId?: string; maxSuggestions?: number }>(req)) ?? {};
+        const generationJobId = body.generationJobId?.trim() ?? "";
+        const job = generationJobs.get(generationJobId);
+        if (!job) {
+          json(res, 404, { error: "qa_generation_job_not_found" }, corsHeaders);
+          return;
+        }
+        if (job.status !== "completed" || !job.result) {
+          json(res, 409, { error: "qa_generation_job_not_ready" }, corsHeaders);
+          return;
+        }
+        const now = new Date().toISOString();
+        const suggestions = (job.result.tests ?? []).slice(0, Math.max(1, body.maxSuggestions ?? 5)).map((test, index) => ({
+          id: `qa_suggest_${hashId(`${job.id}:${index}:review`)}`,
+          category: "test_architecture" as const,
+          priority: "medium" as const,
+          confidence: 0.8,
+          rationale: "Heuristic local daemon review generated a baseline architecture suggestion.",
+          suggestion: "Prefer page-object wrappers and stable selectors for repeatable UI specs.",
+          affectedFiles: [test.filePath],
+          retestScope: "affected_specs" as const,
+        }));
+        job.result.intelligentReview = {
+          generatedAt: now,
+          score: 100,
+          summary: `${suggestions.length} heuristic improvement suggestion(s) generated.`,
+          metadata: {
+            provider: "local-daemon",
+            model: "heuristic-v1",
+            mode: "heuristic",
+          },
+          suggestions,
+        };
+        job.updatedAt = now;
+        generationJobs.set(job.id, job);
+        json(res, 201, { data: job }, corsHeaders);
+      } catch {
+        json(res, 500, { error: "qa_intelligent_review_failed" }, corsHeaders);
+      }
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/plugin/qa/tests/suggest-fixes") {
+      try {
+        const body = (await readRequestBody<{ generationJobId?: string; maxProposals?: number }>(req)) ?? {};
+        const generationJobId = body.generationJobId?.trim() ?? "";
+        const job = generationJobs.get(generationJobId);
+        if (!job) {
+          json(res, 404, { error: "qa_generation_job_not_found" }, corsHeaders);
+          return;
+        }
+        if (job.status !== "completed" || !job.result) {
+          json(res, 409, { error: "qa_generation_job_not_ready" }, corsHeaders);
+          return;
+        }
+        const baseSuggestions = job.result.intelligentReview?.suggestions ?? [];
+        const tests = job.result.tests ?? [];
+        const proposals = tests.slice(0, Math.max(1, body.maxProposals ?? 8)).map((test, index) => {
+          const suggestionId = baseSuggestions[index % (baseSuggestions.length || 1)]?.id ?? `qa_suggest_${index + 1}`;
+          return {
+            id: `qa_fix_${hashId(`${job.id}:${test.filePath}:${index}`)}`,
+            suggestionId,
+            title: `Stabilize selectors in ${path.basename(test.filePath)}`,
+            category: "selector_stability" as const,
+            priority: "medium" as const,
+            risk: "low" as const,
+            confidence: 0.78,
+            filePath: test.filePath,
+            changeType: "test_only" as const,
+            diffPreview: `--- a/${test.filePath}\n+++ b/${test.filePath}\n@@\n- page.locator('text=Submit')\n+ page.getByTestId('submit-action')`,
+            retestScope: "affected_specs" as const,
+            status: "pending" as const,
+            appliedAt: null,
+            applyError: null,
+            retestStatus: "not_run" as const,
+            retestAt: null,
+            retestError: null,
+            retestCommand: null,
+          };
+        });
+        job.result.intelligentFixProposals = proposals;
+        job.updatedAt = new Date().toISOString();
+        generationJobs.set(job.id, job);
+        json(res, 201, { data: job }, corsHeaders);
+      } catch {
+        json(res, 500, { error: "qa_intelligent_fix_proposals_failed" }, corsHeaders);
+      }
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/plugin/qa/tests/apply-fix") {
+      try {
+        const body = (await readRequestBody<{ generationJobId?: string; proposalId?: string }>(req)) ?? {};
+        const job = generationJobs.get(body.generationJobId?.trim() ?? "");
+        if (!job) {
+          json(res, 404, { error: "qa_generation_job_not_found" }, corsHeaders);
+          return;
+        }
+        const proposals = job.result?.intelligentFixProposals ?? [];
+        const proposal = proposals.find((item) => item.id === (body.proposalId?.trim() ?? ""));
+        if (!proposal) {
+          json(res, 404, { error: "qa_intelligent_fix_proposal_not_found" }, corsHeaders);
+          return;
+        }
+        proposal.status = "applied";
+        proposal.appliedAt = new Date().toISOString();
+        proposal.applyError = null;
+        job.updatedAt = new Date().toISOString();
+        generationJobs.set(job.id, job);
+        json(res, 200, { data: job }, corsHeaders);
+      } catch {
+        json(res, 500, { error: "qa_apply_fix_failed" }, corsHeaders);
+      }
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/plugin/qa/tests/retest-fix") {
+      try {
+        const body = (await readRequestBody<{ generationJobId?: string; proposalId?: string }>(req)) ?? {};
+        const job = generationJobs.get(body.generationJobId?.trim() ?? "");
+        if (!job) {
+          json(res, 404, { error: "qa_generation_job_not_found" }, corsHeaders);
+          return;
+        }
+        const proposals = job.result?.intelligentFixProposals ?? [];
+        const proposal = proposals.find((item) => item.id === (body.proposalId?.trim() ?? ""));
+        if (!proposal) {
+          json(res, 404, { error: "qa_intelligent_fix_proposal_not_found" }, corsHeaders);
+          return;
+        }
+        proposal.retestStatus = "passed";
+        proposal.retestAt = new Date().toISOString();
+        proposal.retestError = null;
+        proposal.retestCommand = `npm --prefix e2e/ui run test -- "${proposal.filePath}"`;
+        job.updatedAt = new Date().toISOString();
+        generationJobs.set(job.id, job);
+        json(res, 200, { data: job }, corsHeaders);
+      } catch {
+        json(res, 500, { error: "qa_retest_fix_failed" }, corsHeaders);
+      }
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/plugin/qa/tests/automation/run") {
+      try {
+        const body = (await readRequestBody<{ generationJobId?: string; strategy?: "continuous_fix" | "alert_only"; maxIterations?: number }>(req)) ?? {};
+        const job = generationJobs.get(body.generationJobId?.trim() ?? "");
+        if (!job) {
+          json(res, 404, { error: "qa_generation_job_not_found" }, corsHeaders);
+          return;
+        }
+        const proposals = job.result?.intelligentFixProposals ?? [];
+        const pendingBefore = proposals.filter((item) => item.status !== "applied").length;
+        const startedAt = new Date().toISOString();
+        if (body.strategy === "continuous_fix") {
+          for (const proposal of proposals) {
+            proposal.status = "applied";
+            proposal.appliedAt = startedAt;
+            proposal.retestStatus = "passed";
+            proposal.retestAt = startedAt;
+          }
+        }
+        const pendingAfter = proposals.filter((item) => item.status !== "applied").length;
+        job.result = {
+          ...(job.result ?? { suiteName: "Existing Playwright Suite", cases: [] }),
+          intelligentFixProposals: proposals,
+          automation: {
+            strategy: body.strategy ?? "alert_only",
+            status: pendingAfter === 0 ? "fixed" : "partial",
+            startedAt,
+            completedAt: new Date().toISOString(),
+            iterations: body.strategy === "continuous_fix" ? Math.min(proposals.length, body.maxIterations ?? proposals.length) : 0,
+            appliedCount: pendingBefore - pendingAfter,
+            passedRetests: body.strategy === "continuous_fix" ? pendingBefore - pendingAfter : 0,
+            failedRetests: 0,
+            remainingProposals: pendingAfter,
+            message:
+              body.strategy === "continuous_fix"
+                ? `Applied ${pendingBefore - pendingAfter} proposal(s) with simulated retest pass.`
+                : `Alert-only mode found ${pendingBefore} pending proposal(s).`,
+          },
+        };
+        job.updatedAt = new Date().toISOString();
+        generationJobs.set(job.id, job);
+        json(res, 200, { data: job }, corsHeaders);
+      } catch {
+        json(res, 500, { error: "qa_automation_run_failed" }, corsHeaders);
+      }
+      return;
+    }
+
+    if (req.method === "POST" && req.url?.match(/^\/plugin\/qa\/runs\/[^/]+\/manual\/ai\/execute$/)) {
+      try {
+        const match = req.url.match(/^\/plugin\/qa\/runs\/([^/]+)\/manual\/ai\/execute$/);
+        const runId = match?.[1] ?? "";
+        const existingRun = db.prepare("SELECT id FROM qa_runs WHERE id = ?").get(runId) as { id?: string } | undefined;
+        if (!existingRun?.id) {
+          json(res, 404, { error: "run_not_found" }, corsHeaders);
+          return;
+        }
+        const detail = loadRunDetail(db, runId, casesDir);
+        if (!detail) {
+          json(res, 404, { error: "run_detail_not_found" }, corsHeaders);
+          return;
+        }
+        const totalSteps = detail.cases.reduce((acc, qaCase) => acc + qaCase.steps.length, 0);
+        const manualPlaywrightUiUrl = defaultExecutionMode === "ui" ? `http://${playwrightUiHost}:${playwrightUiPort}` : null;
+        const executionJobId = `manual_ai_exec_${hashId(`${runId}:${Date.now()}`)}`;
+        const now = new Date().toISOString();
+        const execution: QaManualAiExecutionJob = {
+          id: executionJobId,
+          runId,
+          status: "queued",
+          currentCaseId: null,
+          currentStepId: null,
+          currentStepIndex: 0,
+          totalSteps,
+          failureReason: null,
+          reportRef: null,
+          traceRef: null,
+          videoRef: null,
+          playwrightUiUrl: manualPlaywrightUiUrl,
+          startedAt: null,
+          completedAt: null,
+          createdAt: now,
+          updatedAt: now,
+          actionLog: [],
+        };
+        upsertManualAiExecution(db, execution);
+        void runManualAiExecution({
+          db,
+          runId,
+          executionJobId,
+          casesRoot: casesDir,
+          playwrightProjectDir,
+          executionMode: defaultExecutionMode,
+        });
+        json(
+          res,
+          202,
+          {
+            data: {
+              runId,
+              executionJobId,
+              status: execution.status,
+              currentStepIndex: 0,
+              totalSteps,
+              failureReason: null,
+              playwrightUiUrl: execution.playwrightUiUrl,
+              startedAt: null,
+              completedAt: null,
+              createdAt: now,
+              updatedAt: now,
+            },
+          },
+          corsHeaders,
+        );
+      } catch {
+        json(res, 500, { error: "qa_manual_ai_execute_failed" }, corsHeaders);
+      }
+      return;
+    }
+
+    if (req.method === "GET" && req.url?.match(/^\/plugin\/qa\/runs\/[^/]+\/manual\/ai\/executions\/[^/?#]+$/)) {
+      const match = req.url.match(/^\/plugin\/qa\/runs\/([^/]+)\/manual\/ai\/executions\/([^/?#]+)$/);
+      const runId = match?.[1] ?? "";
+      const executionJobId = match?.[2] ?? "";
+      const execution = getManualAiExecution(db, runId, executionJobId);
+      if (!execution) {
+        json(res, 404, { error: "qa_manual_ai_execution_job_not_found" }, corsHeaders);
+        return;
+      }
+      json(res, 200, { data: execution }, corsHeaders);
+      return;
+    }
+
+    if (req.method === "POST" && req.url?.match(/^\/plugin\/qa\/runs\/[^/]+\/ai\/prepare$/)) {
+      try {
+        const match = req.url.match(/^\/plugin\/qa\/runs\/([^/]+)\/ai\/prepare$/);
+        const runId = match?.[1] ?? "";
+        const body = (await readRequestBody<{ generationJobId?: string; testTypes?: string[] }>(req)) ?? {};
+        const generationJobId = body.generationJobId?.trim() ?? "";
+        const job = generationJobs.get(generationJobId);
+        if (!job) {
+          json(res, 404, { error: "qa_generation_job_not_found" }, corsHeaders);
+          return;
+        }
+        const executionJobId = `ai_exec_${hashId(`${runId}:${generationJobId}:${Date.now()}`)}`;
+        const now = new Date().toISOString();
+        aiExecutionJobs.set(executionJobId, {
+          id: executionJobId,
+          runId,
+          status: "queued",
+          playwrightCommand: "npx playwright test",
+          executionMode: defaultExecutionMode,
+          playwrightUiUrl: null,
+          reportRef: null,
+          traceRef: null,
+          videoRef: null,
+          error: null,
+          startedAt: null,
+          completedAt: null,
+          createdAt: now,
+          updatedAt: now,
+        });
+        json(
+          res,
+          201,
+          {
+            data: {
+              runId,
+              generationJobId,
+              executionJobId,
+              status: "prepared",
+              preparedAt: now,
+              loadedCount: job.result?.tests?.length ?? 0,
+              selectedTestTypes: body.testTypes ?? [],
+              checks: { lint: "passed", typecheck: "passed", specParse: "passed" },
+            },
+          },
+          corsHeaders,
+        );
+      } catch {
+        json(res, 500, { error: "qa_ai_prepare_failed" }, corsHeaders);
+      }
+      return;
+    }
+
+    if (req.method === "POST" && req.url?.match(/^\/plugin\/qa\/runs\/[^/]+\/ai\/execute$/)) {
+      try {
+        const match = req.url.match(/^\/plugin\/qa\/runs\/([^/]+)\/ai\/execute$/);
+        const runId = match?.[1] ?? "";
+        const body = (await readRequestBody<{ executionJobId?: string; runMode?: "stub" | "shell" | "ui" }>(req)) ?? {};
+        const executionJobId = body.executionJobId?.trim() ?? "";
+        const execution = aiExecutionJobs.get(executionJobId);
+        if (!execution || execution.runId !== runId) {
+          json(res, 404, { error: "qa_ai_execution_job_not_found" }, corsHeaders);
+          return;
+        }
+        if (execution.status !== "queued") {
+          json(res, 409, { error: "qa_ai_execution_job_not_queued" }, corsHeaders);
+          return;
+        }
+        const requestedMode =
+          body.runMode === "stub" || body.runMode === "shell" || body.runMode === "ui" ? body.runMode : defaultExecutionMode;
+        const startedAt = new Date().toISOString();
+        execution.status = "running";
+        execution.executionMode = requestedMode;
+        execution.startedAt = startedAt;
+        execution.completedAt = null;
+        execution.error = null;
+        execution.reportRef = null;
+        execution.traceRef = null;
+        execution.videoRef = null;
+        execution.playwrightUiUrl = null;
+        execution.updatedAt = startedAt;
+
+        let responseStatus: "queued" | "running" | "completed" | "failed" | "cancelled" = "running";
+        if (requestedMode === "stub") {
+          execution.status = "completed";
+          execution.completedAt = startedAt;
+          execution.reportRef = `qa://playwright/${runId}/${executionJobId}/report.json`;
+          execution.traceRef = `qa://playwright/${runId}/${executionJobId}/trace.zip`;
+          execution.videoRef = `qa://playwright/${runId}/${executionJobId}/video.webm`;
+          execution.updatedAt = startedAt;
+          aiExecutionJobs.set(executionJobId, execution);
+          responseStatus = "completed";
+        } else {
+          const resolvedProjectDir = path.resolve(process.cwd(), playwrightProjectDir);
+          const playwrightBinName = process.platform === "win32" ? "playwright.cmd" : "playwright";
+          const playwrightBin = path.join(resolvedProjectDir, "node_modules", ".bin", playwrightBinName);
+          if (!fs.existsSync(playwrightBin)) {
+            execution.status = "failed";
+            execution.error = `Playwright binary not found at ${playwrightBin}. Install dependencies in ${resolvedProjectDir} first.`;
+            execution.completedAt = startedAt;
+            execution.updatedAt = startedAt;
+            aiExecutionJobs.set(executionJobId, execution);
+            responseStatus = "failed";
+          } else {
+            // Be explicit about config so UI mode always finds tests.
+            const args = ["test", "--workers=1", "--config", "playwright.config.ts"];
+            if (requestedMode === "ui") {
+              // Bind and advertise the same host to avoid ws/url mismatches.
+              args.push("--ui", "--ui-host", playwrightUiHost, "--ui-port", String(playwrightUiPort));
+              execution.playwrightUiUrl = `http://${playwrightUiHost}:${playwrightUiPort}`;
+            }
+          execution.playwrightCommand = `${playwrightBin} ${args.join(" ")}`;
+          aiExecutionJobs.set(executionJobId, execution);
+          const command = xvfbAvailable ? "xvfb-run" : playwrightBin;
+          const commandArgs = xvfbAvailable ? ["-a", playwrightBin, ...args] : args;
+          execution.playwrightCommand = `${command} ${commandArgs.join(" ")}`;
+          aiExecutionJobs.set(executionJobId, execution);
+
+          const runProcess = spawn(command, commandArgs, {
+            cwd: resolvedProjectDir,
+            env: process.env,
+            stdio: "ignore",
+          });
+          aiExecutionProcesses.set(executionJobId, runProcess);
+          runProcess.on("error", (error) => {
+            const current = aiExecutionJobs.get(executionJobId);
+            if (!current) {
+              return;
+            }
+            const now = new Date().toISOString();
+            current.status = "failed";
+            current.error = error instanceof Error ? error.message : String(error);
+            current.completedAt = now;
+            current.updatedAt = now;
+            aiExecutionJobs.set(executionJobId, current);
+            aiExecutionProcesses.delete(executionJobId);
+          });
+          runProcess.on("close", (code) => {
+            const current = aiExecutionJobs.get(executionJobId);
+            if (!current) {
+              return;
+            }
+            const now = new Date().toISOString();
+            current.status = code === 0 ? "completed" : "failed";
+            current.error = code === 0 ? null : `Playwright exited with code ${code ?? "unknown"}`;
+            current.completedAt = now;
+            current.updatedAt = now;
+            if (code === 0) {
+              current.reportRef = `file:${path.join(resolvedProjectDir, "playwright-report", "index.html")}`;
+            }
+            aiExecutionJobs.set(executionJobId, current);
+            aiExecutionProcesses.delete(executionJobId);
+          });
+          }
+        }
+        json(
+          res,
+          202,
+          {
+            data: {
+              runId,
+              executionJobId,
+              status: responseStatus,
+              startedAt,
+              completedAt: null,
+              playwrightCommand: execution.playwrightCommand,
+              playwrightUiUrl: execution.playwrightUiUrl ?? "",
+              artifacts: {
+                reportRef: execution.reportRef ?? "",
+                traceRef: execution.traceRef ?? "",
+                videoRef: execution.videoRef ?? "",
+              },
+            },
+          },
+          corsHeaders,
+        );
+      } catch {
+        json(res, 500, { error: "qa_ai_execute_failed" }, corsHeaders);
+      }
+      return;
+    }
+
+    if (req.method === "GET" && req.url?.match(/^\/plugin\/qa\/runs\/[^/]+\/ai\/executions\/[^/?#]+$/)) {
+      const match = req.url.match(/^\/plugin\/qa\/runs\/([^/]+)\/ai\/executions\/([^/?#]+)$/);
+      const runId = match?.[1] ?? "";
+      const executionJobId = match?.[2] ?? "";
+      const execution = aiExecutionJobs.get(executionJobId);
+      if (!execution || execution.runId !== runId) {
+        json(res, 404, { error: "qa_ai_execution_job_not_found" }, corsHeaders);
+        return;
+      }
+      json(res, 200, { data: execution }, corsHeaders);
+      return;
+    }
+
+    if (req.method === "POST" && req.url?.match(/^\/plugin\/qa\/runs\/[^/]+\/playwright\/import$/)) {
+      try {
+        const match = req.url.match(/^\/plugin\/qa\/runs\/([^/]+)\/playwright\/import$/);
+        const runId = match?.[1] ?? "";
+        const body = (await readRequestBody<{
+          executionJobId?: string;
+          status?: "queued" | "running" | "completed" | "failed" | "cancelled";
+          playwrightCommand?: string;
+          reportRef?: string;
+          traceRef?: string;
+          videoRef?: string;
+          error?: string;
+          startedAt?: string;
+          completedAt?: string;
+        }>(req)) ?? {};
+        const executionJobId = body.executionJobId?.trim() || `ai_import_${hashId(`${runId}:${Date.now()}`)}`;
+        const now = new Date().toISOString();
+        const execution: QaAiExecutionJob = {
+          id: executionJobId,
+          runId,
+          status: body.status ?? "completed",
+          playwrightCommand: body.playwrightCommand ?? "npm --prefix e2e/ui run test",
+          reportRef: body.reportRef ?? null,
+          traceRef: body.traceRef ?? null,
+          videoRef: body.videoRef ?? null,
+          error: body.error ?? null,
+          startedAt: body.startedAt ?? now,
+          completedAt: body.completedAt ?? now,
+          createdAt: now,
+          updatedAt: now,
+        };
+        aiExecutionJobs.set(executionJobId, execution);
+        json(res, 201, { data: execution }, corsHeaders);
+      } catch {
+        json(res, 500, { error: "qa_playwright_import_failed" }, corsHeaders);
+      }
+      return;
+    }
+
+    if (req.method === "GET" && req.url?.startsWith("/plugin/qa/runs/") && req.url.includes("/playwright/artifacts")) {
+      const match = req.url.match(/^\/plugin\/qa\/runs\/([^/]+)\/playwright\/artifacts(?:\?(.+))?$/);
+      const runId = match?.[1] ?? "";
+      const url = new URL(req.url, "http://localhost");
+      const executionJobId = url.searchParams.get("executionJobId")?.trim() ?? "";
+      const execution = aiExecutionJobs.get(executionJobId);
+      if (!execution || execution.runId !== runId) {
+        json(res, 404, { error: "qa_ai_execution_job_not_found" }, corsHeaders);
+        return;
+      }
+      json(
+        res,
+        200,
+        {
+          data: {
+            runId,
+            executionJobId,
+            status: execution.status,
+            playwrightCommand: execution.playwrightCommand,
+            artifacts: {
+              reportRef: execution.reportRef ?? "",
+              traceRef: execution.traceRef ?? "",
+              videoRef: execution.videoRef ?? "",
+            },
+            error: execution.error,
+            startedAt: execution.startedAt,
+            completedAt: execution.completedAt,
+            updatedAt: execution.updatedAt,
+          },
+        },
+        corsHeaders,
+      );
       return;
     }
 

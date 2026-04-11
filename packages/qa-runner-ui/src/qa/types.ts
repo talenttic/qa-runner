@@ -341,6 +341,7 @@ export interface QaAiExecuteResult {
   startedAt: string | null;
   completedAt: string | null;
   playwrightCommand: string;
+  playwrightUiUrl?: string;
   artifacts: {
     reportRef: string;
     traceRef: string;
@@ -354,6 +355,7 @@ export interface QaAiExecutionStatus {
   runId: string;
   status: "queued" | "running" | "completed" | "failed" | "cancelled";
   playwrightCommand: string;
+  playwrightUiUrl?: string | null;
   reportRef: string | null;
   traceRef: string | null;
   videoRef: string | null;
@@ -362,6 +364,35 @@ export interface QaAiExecutionStatus {
   completedAt: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface QaManualAiExecutionLogItem {
+  at: string;
+  caseId: string;
+  stepId: string;
+  stepText: string;
+  status: "passed" | "failed";
+  reason?: string;
+}
+
+export interface QaManualAiExecutionStatus {
+  id: string;
+  runId: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  currentCaseId: string | null;
+  currentStepId: string | null;
+  currentStepIndex: number;
+  totalSteps: number;
+  failureReason: string | null;
+  reportRef: string | null;
+  traceRef: string | null;
+  videoRef: string | null;
+  playwrightUiUrl?: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  actionLog: QaManualAiExecutionLogItem[];
 }
 
 export interface QaPlaywrightArtifacts {

@@ -1,244 +1,135 @@
 # QA Runner
 
-QA Runner is a local-first QA workflow for manual testing and AI-assisted generation of QA suites.  
-You get:
-1. A local UI for executing manual test runs.
-2. AI-assisted generation of QA markdown suites and Playwright scaffolds.
-3. A lightweight daemon that reads/writes test suites inside your repo.
+QA Runner is a local-first QA platform for:
+1. Manual QA execution in a local UI.
+2. AI-assisted generation/validation of QA suites.
+3. Flakiness + healing tracking and KPI reporting.
 
-> Package scope note: `@talenttic/*` is the current scope for this repo.
+Cloud is intentionally split out of this repo. `@talenttic/qa-runner-cloud` is managed separately.
 
-## What You Install
+## Install Model (Current)
 
-For manual testing + AI generation, you need:
-1. `@talenttic/qa-runner` (entrypoint command)
-2. `@talenttic/qa-runner-daemon` (API + file access)
-3. `@talenttic/qa-runner-ui` (UI bundle)
-
-Not needed right now:
-1. `qa-runner-vscode` (VS Code marketplace, not npm)
-
-Cloud note:
-`@talenttic/qa-runner-cloud` now lives in a **separate repo** and is not part of this workspace.
-
-## Package Roles (What Each One Is For)
-
-1. **daemon** (`@talenttic/qa-runner-daemon`)
-   - Local server for the UI and API.
-   - Reads/writes `docs/qa-cases`, stores runs in SQLite.
-
-2. **cli** (`@talenttic/qa-runner`)
-   - User entrypoint: starts daemon/UI and runs generation commands.
-   - What most users install in their project.
-
-3. **ui** (`@talenttic/qa-runner-ui`)
-   - Frontend UI for manual runs + AI generation.
-   - Served by the daemon in real usage.
-
-## Which Package Should I Use?
-
-1. **I want to run QA Runner in my project**  
-   Install `@talenttic/qa-runner`
-
-2. **I want the UI for manual QA**  
-   Run the daemon (`@talenttic/qa-runner-daemon`) and open `http://localhost:4545/ui`
-
-3. **I want to embed or extend QA logic**  
-   Import `@talenttic/qa-runner`
-
-4. **I want to hack on the UI itself**  
-   Use `@talenttic/qa-runner-ui` in dev mode (repo only)
-
-## How the Pieces Fit Together
-
-```
-CLI (entrypoint)
-  └── starts Daemon (local server)
-        ├── uses core exports (generation + validation logic)
-        └── serves UI (manual runs + AI controls)
-```
-
-In normal usage, **install the CLI only**. It brings in the daemon, and the daemon serves the UI.
-
-## Prereqs
-1. Node.js 22+
-
-## Quickstart (Consumer Project)
-
-From your project repo:
+For consumers, install only:
 
 ```bash
 npm install -D @talenttic/qa-runner
 ```
 
-Start the daemon (this also serves the UI):
+`@talenttic/qa-runner` is the CLI entrypoint and includes what you need to run daemon/UI workflows.
+
+## Monorepo Packages
+
+1. `@talenttic/qa-runner` (CLI + core + daemon wiring)
+2. `@talenttic/qa-runner-daemon` (daemon re-export package)
+3. `@talenttic/qa-runner-ui` (UI bundle + UI dev tooling)
+
+## Implemented Features (Current)
+
+1. Manual QA suite generation (`docs/qa-cases`).
+2. Playwright scaffold generation (`e2e/generated`).
+3. Self-healing system (selector recovery strategies + retry orchestration + manifest tracking).
+4. AI auto-testing mode (step interpretation, confidence scoring, validation artifacts).
+5. Flakiness detection/reporting (per-case score, unstable flag, category breakdown).
+6. Runtime environment controls (`dev|stage|prod`, CLI overrides).
+7. KPI reporting + gating:
+   - self-healing reduction KPI
+   - manual guide confidence KPI
+
+## Quickstart (Consumer Project)
+
+1. Install:
+
+```bash
+npm install -D @talenttic/qa-runner
+```
+
+2. Start daemon + UI:
 
 ```bash
 npx qa-runner daemon start
 ```
 
-Open the UI:
+3. Open:
 
-```
+```text
 http://localhost:4545/ui
 ```
 
-Standalone demo UI (no daemon, sample data):
+4. Generate artifacts:
 
 ```bash
-npx qa-runner demo
+npx qa-runner generate --mode all --env stage
 ```
 
-If you want to run the UI separately (Vite dev server, repo only):
+5. Run test command + healing stats:
 
 ```bash
-export VITE_API_URL=http://localhost:4545
-cd packages/qa-runner-ui
-npm run dev
+npx qa-runner test --env stage --report-healing-stats
 ```
 
-## Dev Quickstart (Repo)
+6. KPI report:
 
 ```bash
-npm install
-npm run build
+npx qa-runner report --kpi --baseline-manifest tools/qa-runner.manifest.baseline.json
 ```
 
-Standalone UI (demo data):
+## Important Runtime Behavior
+
+1. `qa-runner test` runs `tests.command` from `tools/qa-runner.config.js` when provided.
+2. If no `tests.command` is configured and `e2e/ui/package.json` is missing, the test runner step is skipped cleanly.
+3. AI auto-testing, self-healing, and flakiness are controlled by `tools/qa-runner.config.js`.
+
+## Recommended Config File
+
+Create `tools/qa-runner.config.js` (example shape):
+
+```js
+module.exports = {
+  skills: {
+    manualGuide: { enabled: true },
+    e2eScaffold: { enabled: true },
+    selfHealing: { enabled: true, strategy: "moderate", retryBudget: 5 },
+    aiAutoTester: { enabled: true, confidenceThreshold: 0.7, executionMode: "simulated" },
+    flakinessDetector: { enabled: true, unstableThreshold: 0.2 },
+  },
+  environments: {
+    dev: { autoTest: { enabled: true }, healing: { strategy: "aggressive", retryBudget: "unlimited" } },
+    stage: { autoTest: { enabled: true }, healing: { strategy: "moderate", retryBudget: 5 } },
+    prod: { autoTest: { enabled: false }, healing: { strategy: "conservative", retryBudget: 2 } },
+  },
+  tests: {
+    command: "npm --prefix e2e/ui test",
+  },
+};
+```
+
+## CLI Commands
 
 ```bash
-cd packages/qa-runner-ui
-npm run dev
-```
-
-### Standalone UI (Demo Mode)
-
-You can run the UI without the daemon (sample data will appear):
-
-```bash
-cd packages/qa-runner-ui
-npm run dev
-```
-
-To connect the standalone UI to a daemon, set:
-
-```bash
-export VITE_API_URL=http://localhost:4545
-npm run dev
-```
-
-### Custom Test Types (Plugin Config)
-
-Define custom AI test types in:
-
-```
-tools/qa-runner.plugins.json
-```
-
-Example:
-
-```json
-{
-  "types": [
-    {
-      "id": "performance_smoke",
-      "label": "Performance Smoke",
-      "description": "Quick performance sanity checks.",
-      "details": "Runs lightweight performance assertions focused on startup and critical flows."
-    }
-  ]
-}
-```
-
-Restart the daemon after editing the file.
-
-### GitHub Issues Integration
-
-To create GitHub issues from QA Runner:
-
-1. Create a GitHub PAT with `repo` scope.
-2. Export the token before starting the daemon:
-
-```bash
-export QA_RUNNER_GITHUB_TOKEN=ghp_...
-npx qa-runner daemon start
-```
-
-UI location: `QA Runner → GitHub Issue` section inside a manual run.
-
-## Generate Artifacts (One-Shot)
-
-```bash
-npx qa-runner generate --summary "Added settings form" --files src/... --mode all
-```
-
-## Generate In CI Mode (Deterministic)
-
-```bash
-npx qa-runner generate --summary "..." --files src/... --mode all --ci
-```
-
-## Run Tests + Report
-
-```bash
-npx qa-runner test
-npx qa-runner report
-```
-
-## E2E (Playwright) Notes
-
-Generated Playwright specs and POMs land in:
-
-```
-e2e/generated
-```
-
-To run the UI E2E suite (from the target repo):
-
-```bash
-npm --prefix e2e/ui test
-```
-
-## Config
-
-Configure per-repo settings in:
-
-```
-tools/qa-runner.config.js
-```
-
-## CLI Usage (Direct)
-
-```bash
-qa-runner daemon start
-qa-runner ui
-qa-runner generate --summary "..." --files a.ts,b.ts --mode manual|e2e|all --ci
-qa-runner test --env stage
+qa-runner daemon start|stop|status --port 4545
+qa-runner ui --port 4545
+qa-runner demo --port 4546
+qa-runner generate --summary "..." --files a.ts,b.ts --mode manual|e2e|all --env dev|stage|prod --auto-test|--no-auto-test --healing=aggressive|moderate|conservative --ci --diff "<git diff>"
+qa-runner test --env stage|prod --auto-test|--no-auto-test --healing=aggressive|moderate|conservative --validate-manual-cases --report-healing-stats --validate-healing-rate 20%
 qa-runner report
+qa-runner report --kpi --baseline-manifest tools/qa-runner.manifest.baseline.json --ai-validation-root e2e/generated --enforce-kpi
 ```
 
-## Release (npm via GitHub Actions)
+## Repo Scripts
 
-The repo publishes to npm on tag pushes matching `v*.*.*`.
+From repo root:
 
-Required GitHub secret:
-1. `NPM_TOKEN` (npm automation token with access to `@talenttic`)
+```bash
+npm run qa:daemon
+npm run qa:ui
+npm run qa:generate
+npm run qa:test
+npm run qa:report
+npm run qa:kpi
+npm run qa:kpi:enforce
+npm run qa:demo
+```
 
-Release steps:
-1. `git tag v0.1.0`
-2. `git push origin v0.1.0`
+## Release
 
-### Versioning (Changesets)
-
-This repo uses Changesets to bump versions before tagging.
-
-Workflow:
-1. `npm run changeset` (select packages + bump type)
-2. `npm run version-packages`
-3. Commit the version bumps
-4. Tag and push (example: `v0.1.0`)
-
-CI:
-1. A PR check requires a changeset.
-2. On main, a Changesets version PR is created automatically.
-3. On main, Changesets can publish to npm when versions are present.
+See `RELEASE.md`.

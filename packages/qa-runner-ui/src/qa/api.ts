@@ -3,6 +3,7 @@ import { API_URL } from "../config/runtime";
 import type {
   QaAutomationStrategy,
   QaAiExecutionStatus,
+  QaManualAiExecutionStatus,
   QaAiExecuteResult,
   QaAiPrepareResult,
   QaCaseStatus,
@@ -920,12 +921,14 @@ export const prepareQaAiRun = async (input: {
 export const executeQaAiRun = async (input: {
   runId: string;
   executionJobId?: string;
+  runMode?: "stub" | "shell" | "ui";
 }): Promise<QaAiExecuteResult> => {
   const response = await apiFetch(`${API_URL}/plugin/qa/runs/${encodeURIComponent(input.runId)}/ai/execute`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       executionJobId: input.executionJobId,
+      runMode: input.runMode,
     }),
   });
   if (!response.ok) {
@@ -951,6 +954,42 @@ export const fetchQaAiExecutionStatus = async (input: {
   const payload = (await response.json()) as { data?: QaAiExecutionStatus };
   if (!payload.data) {
     throw new Error("AI execution status response shape mismatch");
+  }
+  return payload.data;
+};
+
+export const executeQaManualChecklistAiRun = async (input: {
+  runId: string;
+}): Promise<QaManualAiExecutionStatus> => {
+  const response = await apiFetch(
+    `${API_URL}/plugin/qa/runs/${encodeURIComponent(input.runId)}/manual/ai/execute`,
+    {
+      method: "POST",
+    },
+  );
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  const payload = (await response.json()) as { data?: QaManualAiExecutionStatus };
+  if (!payload.data) {
+    throw new Error("Manual AI execute response shape mismatch");
+  }
+  return payload.data;
+};
+
+export const fetchQaManualAiExecutionStatus = async (input: {
+  runId: string;
+  executionJobId: string;
+}): Promise<QaManualAiExecutionStatus> => {
+  const response = await apiFetch(
+    `${API_URL}/plugin/qa/runs/${encodeURIComponent(input.runId)}/manual/ai/executions/${encodeURIComponent(input.executionJobId)}`,
+  );
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  const payload = (await response.json()) as { data?: QaManualAiExecutionStatus };
+  if (!payload.data) {
+    throw new Error("Manual AI execution status response shape mismatch");
   }
   return payload.data;
 };

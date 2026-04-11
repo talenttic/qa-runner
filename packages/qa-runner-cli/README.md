@@ -1,32 +1,6 @@
 # @talenttic/qa-runner
 
-CLI entrypoint for QA Runner. It:
-1. Starts the daemon + UI
-2. Generates QA markdown suites and Playwright scaffolds
-3. Runs report generation helpers
-
-## When to Use
-Use this package in **consumer projects** to run QA Runner without cloning the repo.
-
-## Which Package Should I Use?
-1. Run QA Runner in your project → `@talenttic/qa-runner` (this package)
-2. Serve UI + API → `@talenttic/qa-runner-daemon`
-3. UI dev mode → `@talenttic/qa-runner-ui`
-
-## How the Pieces Fit Together
-
-```
-CLI (this package)
-  └── starts Daemon
-        ├── uses core exports
-        └── serves UI
-```
-
-In most cases, **install only the CLI**.
-
-## Dependencies / Requirements
-1. Node.js 22+
-2. No additional QA Runner packages are required for local usage.
+Primary package for consumers. This provides the `qa-runner` CLI and includes the consolidated local QA stack.
 
 ## Install
 
@@ -34,49 +8,55 @@ In most cases, **install only the CLI**.
 npm install -D @talenttic/qa-runner
 ```
 
+## What It Does
+
+1. Starts daemon + serves UI.
+2. Generates manual guides and Playwright scaffolds.
+3. Runs AI auto-testing + flakiness/healing tracking.
+4. Produces standard report and KPI report.
+
+## Feature Scope (Implemented)
+
+1. `self-healing`:
+   - selector recovery chain
+   - retry budgeting/strategy
+   - healing summary in manifest
+2. `ai mode / auto-testing`:
+   - manual-step interpretation
+   - confidence scoring
+   - `*.ai-validation.json`, execution/plan artifacts
+3. `flakiness`:
+   - pass/fail pattern tracking
+   - flake score + unstable status
+   - category grouping (`timing|selector|assertion`)
+4. `kpi`:
+   - `report --kpi`
+   - optional enforcement via `--enforce-kpi`
+
 ## Commands
 
-Start daemon:
-
 ```bash
-npx qa-runner daemon start
+npx qa-runner daemon start|stop|status --port 4545
+npx qa-runner ui --port 4545
+npx qa-runner demo --port 4546
+npx qa-runner generate --summary "..." --files src/a.ts,src/b.ts --mode manual|e2e|all --env dev|stage|prod --auto-test|--no-auto-test --healing=aggressive|moderate|conservative --ci --diff "<git diff>"
+npx qa-runner test --env stage|prod --auto-test|--no-auto-test --healing=aggressive|moderate|conservative --validate-manual-cases --report-healing-stats --validate-healing-rate 20%
+npx qa-runner report
+npx qa-runner report --kpi --baseline-manifest tools/qa-runner.manifest.baseline.json --ai-validation-root e2e/generated --enforce-kpi
 ```
 
-Standalone demo UI (no daemon, sample data):
+## Config
 
-```bash
-npx qa-runner demo
-```
+Use `tools/qa-runner.config.js` to configure:
+1. Skill toggles (`selfHealing`, `aiAutoTester`, `flakinessDetector`, etc.)
+2. Environment defaults (`dev`, `stage`, `prod`)
+3. Optional `tests.command` for `qa-runner test`
 
-Generate QA suites + tests:
+## Test Command Behavior
 
-```bash
-npx qa-runner generate --summary "..." --files src/... --mode manual|e2e|all --auto-test|--no-auto-test --healing=moderate
-```
-
-Generate deterministic output in CI:
-
-```bash
-npx qa-runner generate --summary "..." --files src/... --mode all --ci
-```
-
-Run tests with healing and validation gates:
-
-```bash
-npx qa-runner test --env stage --validate-manual-cases --report-healing-stats --validate-healing-rate 20%
-```
-
-Generate KPI report and enforce thresholds:
-
-```bash
-npx qa-runner report --kpi \
-  --baseline-manifest tools/qa-runner.manifest.baseline.json \
-  --enforce-kpi
-```
-
-## What It Does Not Do
-1. It does not run your test runner directly.
-2. It does not deploy or publish artifacts.
+1. If `tests.command` is configured, CLI executes it.
+2. If `tests.command` is not configured and `e2e/ui/package.json` is missing, CLI skips runner execution and still reports healing stats.
 
 ## Docs
+
 Main repo: https://github.com/talenttic/qa-runner

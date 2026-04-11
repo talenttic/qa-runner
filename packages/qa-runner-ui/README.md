@@ -1,75 +1,43 @@
 # @talenttic/qa-runner-ui
 
-React UI for QA Runner. It provides:
-1. Manual test execution UI (cases, steps, evidence, run history).
-2. AI generation controls (generate suites, review, scaffold).
-3. Collaboration, sharing, and reporting panels.
+UI package for QA Runner.
 
-This package is **not a standalone product**. It is intended to be **served by the QA Runner daemon**, which supplies API data from your repo.
+## Important
 
-## When to Use
-Use this when you want:
-1. A local UI for running manual QA.
-2. A UI to trigger AI-assisted QA generation.
-3. A UI connected to your project’s `docs/qa-cases` folder.
+Most users should not install this package directly.  
+Install `@talenttic/qa-runner` and use the daemon-served UI.
 
-## Which Package Should I Use?
-1. Run QA Runner in your project → `@talenttic/qa-runner`
-2. Serve UI + API → `@talenttic/qa-runner-daemon`
-3. Extend logic → `@talenttic/qa-runner`
-4. UI dev mode → `@talenttic/qa-runner-ui` (this package)
-
-## How the Pieces Fit Together
-
-```
-CLI
-  └── starts Daemon
-        ├── uses core exports
-        └── serves UI (this package)
-```
-
-## Dependencies / Requirements
-1. Node.js 22+
-2. QA Runner daemon running (for real data)
-3. `@talenttic/qa-runner-daemon` and `@talenttic/qa-runner` are required by the full stack.
-
-## Install
-
-```bash
-npm install -D @talenttic/qa-runner-ui
-```
-
-## Run (via daemon)
+## Run With Real Data
 
 ```bash
 npx qa-runner daemon start
 ```
 
-Then open:
+Open:
 
-```
+```text
 http://localhost:4545/ui
 ```
 
-Standalone demo UI (no daemon, sample data):
+## Standalone Demo
 
 ```bash
 npx qa-runner demo
 ```
 
-## Dev (standalone UI)
-Standalone mode is for **UI development only**. It uses sample data.
+## UI Dev Mode (repo maintainers)
 
 ```bash
 export VITE_API_URL=http://localhost:4545
 npm run dev
 ```
 
-## What It Does Not Do
-1. It does not scan your repo by itself.
-2. It does not write QA cases without the daemon.
-3. It does not run tests directly (that’s handled by the daemon/CLI).
+## Scope
+
+1. Manual QA execution views.
+2. AI generation/validation controls.
+3. Flakiness and runtime status surfaces via daemon API.
 
 ## Docs
+
 Main repo: https://github.com/talenttic/qa-runner
-Daemon package: https://www.npmjs.com/package/@talenttic/qa-runner-daemon

@@ -17,10 +17,12 @@ import {
   deleteCaseComment as deleteCaseCommentApi,
   duplicateQaSuite,
   executeQaAiRun,
+  executeQaManualChecklistAiRun,
   fetchQaCustomTestTypes,
   fetchCaseComments,
   fetchQaArchivedSuites,
   fetchQaAiExecutionStatus,
+  fetchQaManualAiExecutionStatus,
   fetchQaGenerationHistory,
   fetchQaGenerationJob,
   fetchQaGenerationStatus,
@@ -61,6 +63,7 @@ import type {
   QaFlakinessReport,
   QaGenerationJob,
   QaGenerationStatus,
+  QaManualAiExecutionStatus,
   QaWorkspaceProfile,
   QaManualRunReport,
   QaMarkdownValidationReport,
@@ -386,9 +389,12 @@ const ManualTestingPageContent = ({
   const [loadResult, setLoadResult] = useState<QaTestsLoadResult | null>(null);
   const [prepareResult, setPrepareResult] = useState<QaAiPrepareResult | null>(null);
   const [executeResult, setExecuteResult] = useState<QaAiExecuteResult | null>(null);
+  const [manualAiExecution, setManualAiExecution] = useState<QaManualAiExecutionStatus | null>(null);
+  const [manualAiPolling, setManualAiPolling] = useState(false);
   const [runtimeStatus, setRuntimeStatus] = useState<QaRuntimeStatus | null>(null);
   const [runtimeLoading, setRuntimeLoading] = useState(false);
   const [runtimeAutoRefresh, setRuntimeAutoRefresh] = useState(false);
+  const [showAdvancedActions, setShowAdvancedActions] = useState(false);
   const [flakinessReport, setFlakinessReport] = useState<QaFlakinessReport | null>(null);
   const [flakinessLoading, setFlakinessLoading] = useState(false);
   const [destructiveModalAction, setDestructiveModalAction] = useState<QaDestructiveAction | null>(null);
@@ -508,7 +514,7 @@ const ManualTestingPageContent = ({
                 type="button"
                 onClick={() => addCollaborator()}
                 disabled={busy}
-                className="w-full rounded-2xl border border-brand-200 bg-brand-50 px-3 py-2 text-xs font-semibold text-brand-700 disabled:opacity-60 dark:border-brand-800 dark:bg-brand-900/30 dark:text-brand-200"
+                className="w-full rounded-2xl border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-800 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100 dark:hover:bg-slate-900"
                 data-testid="qa-collab-add"
               >
                 Add Collaborator
@@ -559,7 +565,7 @@ const ManualTestingPageContent = ({
                 <button
                   type="button"
                   onClick={() => window.open(shareLink, "_blank", "noopener,noreferrer")}
-                  className="rounded-xl border border-brand-200 px-2 py-1 text-[11px] font-semibold text-brand-700 dark:border-brand-800 dark:text-brand-200"
+                  className="rounded-xl border border-slate-300 bg-white px-2 py-1 text-[11px] font-semibold text-slate-800 transition-colors hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
                   data-testid="qa-share-open"
                 >
                   Open Link
@@ -1037,6 +1043,7 @@ const ManualTestingPageContent = ({
           startedAt: status.startedAt,
           completedAt: status.completedAt,
           playwrightCommand: status.playwrightCommand,
+          playwrightUiUrl: status.playwrightUiUrl ?? undefined,
           artifacts: {
             reportRef: status.reportRef ?? "",
             traceRef: status.traceRef ?? "",
@@ -1073,6 +1080,59 @@ const ManualTestingPageContent = ({
       clearInterval(interval);
     };
   }, [aiPolling, executeResult]);
+
+  useEffect(() => {
+    if (!manualAiPolling || !manualAiExecution) {
+      return;
+    }
+    if (
+      manualAiExecution.status === "completed" ||
+      manualAiExecution.status === "failed" ||
+      manualAiExecution.status === "cancelled"
+    ) {
+      setManualAiPolling(false);
+      return;
+    }
+
+    let cancelled = false;
+    let inFlight = false;
+    const poll = async (): Promise<void> => {
+      if (cancelled || inFlight) {
+        return;
+      }
+      inFlight = true;
+      try {
+        const status = await fetchQaManualAiExecutionStatus({
+          runId: manualAiExecution.runId,
+          executionJobId: manualAiExecution.id,
+        });
+        if (cancelled) {
+          return;
+        }
+        setManualAiExecution(status);
+        if (status.status === "completed" || status.status === "failed" || status.status === "cancelled") {
+          setManualAiPolling(false);
+          await reloadRunDetail(status.runId);
+        }
+      } catch (pollError) {
+        if (!cancelled) {
+          const message = pollError instanceof Error ? pollError.message : "Failed to refresh manual AI execution";
+          setAiPollError(message);
+        }
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    void poll();
+    const interval = setInterval(() => {
+      void poll();
+    }, 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [manualAiPolling, manualAiExecution]);
 
   const addCaseComment = (): void => {
     if (!runDetail || !selectedCase) {
@@ -1770,13 +1830,42 @@ const ManualTestingPageContent = ({
       const started = await executeQaAiRun({
         runId: effectivePrepare.runId,
         executionJobId: effectivePrepare.executionJobId,
+        runMode: "ui",
       });
       setExecuteResult(started);
+      if (started.playwrightUiUrl) {
+        window.open(started.playwrightUiUrl, "_blank", "noopener,noreferrer");
+      }
       setAiPollError("");
       setAiPolling(true);
     } catch (executeError) {
       setError(executeError instanceof Error ? executeError.message : "Failed to execute AI run");
       setAiPolling(false);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const executeManualChecklistAiAction = async (): Promise<void> => {
+    if (!runDetail) {
+      setError("Start a run before executing manual AI checklist.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const execution = await executeQaManualChecklistAiRun({
+        runId: runDetail.run.id,
+      });
+      setManualAiExecution(execution);
+      if (execution.playwrightUiUrl) {
+        window.open(execution.playwrightUiUrl, "_blank", "noopener,noreferrer");
+      }
+      setManualAiPolling(true);
+      setAiPollError("");
+    } catch (executeError) {
+      setError(executeError instanceof Error ? executeError.message : "Failed to execute manual AI checklist");
+      setManualAiPolling(false);
     } finally {
       setBusy(false);
     }
@@ -2327,7 +2416,7 @@ const ManualTestingPageContent = ({
                       onClick={() => setMode?.("manual")}
                       className={`rounded-lg px-4 py-2.5 text-sm font-semibold min-h-[2.5rem] touch-manipulation ${
                         mode === "manual"
-                          ? "bg-brand-500 text-white"
+                          ? "border border-sky-600 bg-sky-600 text-white"
                           : "border border-surface-300 bg-white text-ink-700 hover:bg-surface-50 active:bg-surface-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800 dark:active:bg-slate-700"
                       }`}
                     >
@@ -2339,7 +2428,7 @@ const ManualTestingPageContent = ({
                 disabled={!aiModeEnabled}
                 className={`rounded-lg px-4 py-2.5 text-sm font-semibold min-h-[2.5rem] touch-manipulation ${
                   mode === "ai"
-                    ? "bg-brand-500 text-white"
+                    ? "border border-sky-600 bg-sky-600 text-white"
                     : "border border-surface-300 bg-white text-ink-700 hover:bg-surface-50 active:bg-surface-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800 dark:active:bg-slate-700"
                 } disabled:opacity-60`}
               >
@@ -2481,6 +2570,17 @@ const ManualTestingPageContent = ({
                       Enable with <code>QA_RUNNER_SCHEDULE_ALERT_ONLY_ENABLED=true</code>.
                     </>
                   )}
+                </p>
+                <p className="mt-2 text-xs text-ink-600 dark:text-slate-300">
+                  QA daemon runs in the background. Clicking <span className="font-semibold">Run Tests</span> starts one
+                  execution job and updates this page live.
+                </p>
+                <p className="mt-1 text-xs text-ink-600 dark:text-slate-300">
+                  No new tab is required. Playwright recorder/codegen tab integration is not wired in this flow yet.
+                </p>
+                <p className="mt-1 text-xs text-ink-600 dark:text-slate-300">
+                  <span className="font-semibold">Continuous Auto-Fix</span> runs one batch, then stops. It is not an
+                  infinite background loop.
                 </p>
               </div>
 
@@ -2688,13 +2788,67 @@ const ManualTestingPageContent = ({
                 </div>
               ) : null}
 
-              <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap">
-                <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+              <div className="space-y-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-ink-500 dark:text-slate-400">
+                  Workflow Actions
+                </p>
+                <div className="rounded-lg border border-surface-300 bg-surface-50 p-3 text-sm text-ink-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
+                  <p className="font-semibold">Beginner Workflow (Recommended)</p>
+                  <p className="mt-1 text-xs text-ink-600 dark:text-slate-300">
+                    Step 1 loads existing Playwright specs. Step 2 runs one AI execution job. Step 3 runs one auto-fix/retest cycle.
+                  </p>
+                </div>
+                <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
+                  <button
+                    type="button"
+                    onClick={() => void loadExistingSuiteAction()}
+                    disabled={busy}
+                    title="Loads existing Playwright specs from the configured test directory into the QA job context."
+                    aria-label="Step 1: Load existing Playwright suite"
+                    className="min-h-[2.5rem] touch-manipulation rounded-lg border border-indigo-300 bg-white px-4 py-2.5 text-sm font-semibold text-indigo-700 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-indigo-800 dark:bg-slate-900 dark:text-indigo-300 dark:hover:bg-slate-800"
+                  >
+                    1) Load Existing Suite
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void executeAiRunAction()}
+                    disabled={busy || !generationJob || !playwrightUiBridgeEnabled}
+                    title="Prepares and starts one AI test execution job, then streams status and artifacts here."
+                    aria-label="Step 2: Run tests with AI"
+                    className="min-h-[2.5rem] touch-manipulation rounded-lg border border-emerald-600 bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    2) Run Tests (Prepare + Execute)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void runAutomationAction("continuous_fix")}
+                    disabled={busy || !generationJob}
+                    title="Runs one continuous auto-fix cycle: apply proposals, retest, then stop."
+                    aria-label="Step 3: Run one-time auto-fix and retest"
+                    className="min-h-[2.5rem] touch-manipulation rounded-lg border border-teal-300 bg-teal-50 px-4 py-2.5 text-sm font-semibold text-teal-900 transition-colors hover:bg-teal-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-teal-900/50 dark:bg-teal-950/30 dark:text-teal-200 dark:hover:bg-teal-950/50"
+                  >
+                    3) Auto-Fix + Retest (One-Time)
+                  </button>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowAdvancedActions((prev) => !prev)}
+                    title="Shows expert controls for manual phase-by-phase QA operations."
+                    aria-label="Toggle advanced QA workflow actions"
+                    className="min-h-[2.5rem] touch-manipulation rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-800 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
+                  >
+                    {showAdvancedActions ? "Hide Advanced Actions" : "Show Advanced Actions"}
+                  </button>
+                  <p className="text-xs text-ink-600 dark:text-slate-300">Use advanced only if you need manual phase control.</p>
+                </div>
+                {showAdvancedActions ? (
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
                   <button
                     type="button"
                     onClick={() => void runGeneration()}
                     disabled={busy}
-                    className="rounded-lg bg-brand-500 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-60 min-h-[2.5rem] touch-manipulation"
+                    className="min-h-[2.5rem] touch-manipulation rounded-lg border border-sky-600 bg-sky-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     Generate Checklist
                   </button>
@@ -2702,25 +2856,15 @@ const ManualTestingPageContent = ({
                     type="button"
                     onClick={() => void runGenerateTests()}
                     disabled={busy}
-                    className="rounded-lg border border-brand-300 px-4 py-2.5 text-sm font-semibold text-brand-700 disabled:opacity-60 dark:border-brand-700 dark:text-brand-300 min-h-[2.5rem] touch-manipulation"
+                    className="min-h-[2.5rem] touch-manipulation rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-800 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
                   >
-                    Generate Tests
+                    Generate Tests (AI Draft)
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => void loadExistingSuiteAction()}
-                    disabled={busy}
-                    className="rounded-lg border border-indigo-300 px-4 py-2.5 text-sm font-semibold text-indigo-700 disabled:opacity-60 dark:border-indigo-800 dark:text-indigo-300 min-h-[2.5rem] touch-manipulation"
-                  >
-                    Load Existing Suite
-                  </button>
-                </div>
-                <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
                   <button
                     type="button"
                     onClick={() => void runIntelligentReviewAction()}
                     disabled={busy || !generationJob?.result?.review}
-                    className="rounded-lg border border-violet-300 px-4 py-2.5 text-sm font-semibold text-violet-700 disabled:opacity-60 dark:border-violet-800 dark:text-violet-300 min-h-[2.5rem] touch-manipulation"
+                    className="min-h-[2.5rem] touch-manipulation rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-800 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
                   >
                     Intelligent Review
                   </button>
@@ -2728,7 +2872,7 @@ const ManualTestingPageContent = ({
                     type="button"
                     onClick={() => void generateFixProposalsAction()}
                     disabled={busy || !generationJob?.result?.intelligentReview}
-                    className="rounded-lg border border-fuchsia-300 px-4 py-2.5 text-sm font-semibold text-fuchsia-700 disabled:opacity-60 dark:border-fuchsia-800 dark:text-fuchsia-300 min-h-[2.5rem] touch-manipulation"
+                    className="min-h-[2.5rem] touch-manipulation rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-800 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
                   >
                     Generate Fix Proposals
                   </button>
@@ -2736,17 +2880,15 @@ const ManualTestingPageContent = ({
                     type="button"
                     onClick={() => void loadGeneratedTestsAction()}
                     disabled={busy || !generationJob}
-                    className="rounded-lg border border-surface-300 px-4 py-2.5 text-sm font-semibold text-ink-700 disabled:opacity-60 dark:border-slate-700 dark:text-slate-200 min-h-[2.5rem] touch-manipulation"
+                    className="min-h-[2.5rem] touch-manipulation rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-800 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
                   >
                     Load Tests
                   </button>
-                </div>
-                <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
                   <button
                     type="button"
                     onClick={() => void prepareAiRunAction()}
                     disabled={busy || !generationJob || !playwrightUiBridgeEnabled}
-                    className="rounded-lg border border-emerald-300 px-4 py-2.5 text-sm font-semibold text-emerald-800 disabled:opacity-60 dark:border-emerald-900/50 dark:text-emerald-300 min-h-[2.5rem] touch-manipulation"
+                    className="min-h-[2.5rem] touch-manipulation rounded-lg border border-emerald-300 bg-emerald-50 px-4 py-2.5 text-sm font-semibold text-emerald-900 transition-colors hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-200 dark:hover:bg-emerald-950/50"
                   >
                     Prepare AI Run
                   </button>
@@ -2754,23 +2896,15 @@ const ManualTestingPageContent = ({
                     type="button"
                     onClick={() => void executeAiRunAction()}
                     disabled={busy || !generationJob || !playwrightUiBridgeEnabled}
-                    className="rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-60 min-h-[2.5rem] touch-manipulation"
+                    className="min-h-[2.5rem] touch-manipulation rounded-lg border border-emerald-600 bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     Execute AI Run
                   </button>
                   <button
                     type="button"
-                    onClick={() => void runAutomationAction("continuous_fix")}
-                    disabled={busy || !generationJob}
-                    className="rounded-lg border border-emerald-300 px-4 py-2.5 text-sm font-semibold text-emerald-800 disabled:opacity-60 dark:border-emerald-900/50 dark:text-emerald-300 min-h-[2.5rem] touch-manipulation"
-                  >
-                    Continuous Auto-Fix
-                  </button>
-                  <button
-                    type="button"
                     onClick={() => void runAutomationAction("alert_only")}
                     disabled={busy || !generationJob}
-                    className="rounded-lg border border-amber-300 px-4 py-2.5 text-sm font-semibold text-amber-800 disabled:opacity-60 dark:border-amber-900/50 dark:text-amber-300 min-h-[2.5rem] touch-manipulation"
+                    className="min-h-[2.5rem] touch-manipulation rounded-lg border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm font-semibold text-amber-900 transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200 dark:hover:bg-amber-950/50"
                   >
                     Alert-Only Check
                   </button>
@@ -2779,12 +2913,13 @@ const ManualTestingPageContent = ({
                       type="button"
                       onClick={() => void fetchQaGenerationJob(generationJob.id).then(setGenerationJob).catch(() => undefined)}
                       disabled={busy}
-                      className="rounded-lg border border-surface-300 px-4 py-2.5 text-sm font-semibold text-ink-700 dark:border-slate-700 dark:text-slate-200 min-h-[2.5rem] touch-manipulation"
+                      className="min-h-[2.5rem] touch-manipulation rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-800 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
                     >
                       Refresh Job
                     </button>
                   ) : null}
-                </div>
+                  </div>
+                ) : null}
               </div>
 
               {generationHistory.length > 0 ? (
@@ -3028,6 +3163,19 @@ const ManualTestingPageContent = ({
                   <p className="mt-1 text-xs">
                     Command: <code>{executeResult.playwrightCommand || "pending"}</code>
                   </p>
+                  {executeResult.playwrightUiUrl ? (
+                    <p className="mt-1 text-xs">
+                      Playwright UI:{" "}
+                      <a
+                        href={executeResult.playwrightUiUrl}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                        className="font-semibold underline"
+                      >
+                        {executeResult.playwrightUiUrl}
+                      </a>
+                    </p>
+                  ) : null}
                   <p className="mt-2">
                     Artifacts: <code>{executeResult.artifacts.reportRef || "pending"}</code>,{" "}
                     <code>{executeResult.artifacts.traceRef || "pending"}</code>,{" "}
@@ -3062,6 +3210,7 @@ const ManualTestingPageContent = ({
                               startedAt: status.startedAt,
                               completedAt: status.completedAt,
                               playwrightCommand: status.playwrightCommand,
+                              playwrightUiUrl: status.playwrightUiUrl ?? undefined,
                               artifacts: {
                                 reportRef: status.reportRef ?? "",
                                 traceRef: status.traceRef ?? "",
@@ -3407,7 +3556,7 @@ date: 2026-03-28
                     onClick={() => void startRun(true)}
                     disabled={loading || busy || !selectedSuiteId}
                     data-testid="qa-start-run"
-                    className="rounded-lg bg-brand-500 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-60 min-h-[2.5rem] touch-manipulation"
+                    className="rounded-lg border border-sky-600 bg-sky-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-50 min-h-[2.5rem] touch-manipulation"
                   >
                     Start Run
                   </button>
@@ -3512,10 +3661,18 @@ date: 2026-03-28
                 <div className="flex flex-wrap gap-2">
                   <button
                     type="button"
+                    onClick={() => void executeManualChecklistAiAction()}
+                    disabled={busy}
+                    className="rounded-lg border border-sky-600 bg-sky-600 px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    AI Run Checklist (Watch Only)
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => void finalizeRun()}
                     disabled={busy}
                     data-testid="qa-finalize-run"
-                    className="rounded-lg border border-emerald-300 px-3 py-2 text-sm font-semibold text-emerald-800 dark:border-emerald-900/50 dark:text-emerald-300"
+                    className="rounded-lg border border-emerald-600 bg-emerald-600 px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     Finalize Run
                   </button>
@@ -3523,7 +3680,7 @@ date: 2026-03-28
                     type="button"
                     onClick={() => void downloadRunReportJson()}
                     disabled={busy}
-                    className="rounded-lg border border-blue-300 px-3 py-2 text-sm font-semibold text-blue-800 dark:border-blue-900/50 dark:text-blue-300"
+                    className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-800 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
                   >
                     Download Report JSON
                   </button>
@@ -3531,7 +3688,7 @@ date: 2026-03-28
                     type="button"
                     onClick={() => void downloadRunReportMarkdown()}
                     disabled={busy}
-                    className="rounded-lg border border-indigo-300 px-3 py-2 text-sm font-semibold text-indigo-800 dark:border-indigo-900/50 dark:text-indigo-300"
+                    className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-800 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
                   >
                     Download Report Markdown
                   </button>
@@ -3553,11 +3710,46 @@ date: 2026-03-28
                     type="button"
                     onClick={() => void sendRunReportWebhook()}
                     disabled={busy}
-                    className="rounded-lg border border-fuchsia-300 px-3 py-2 text-sm font-semibold text-fuchsia-800 dark:border-fuchsia-900/50 dark:text-fuchsia-300"
+                    className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-800 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
                   >
                     Send Report Webhook
                   </button>
                 </div>
+                {manualAiExecution ? (
+                  <div className="rounded-lg border border-surface-300 bg-surface-50 p-3 text-xs text-ink-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
+                    <p>
+                      Manual AI execution: <span className="font-semibold">{manualAiExecution.status}</span> · step{" "}
+                      <span className="font-semibold">{manualAiExecution.currentStepIndex}</span>/
+                      <span className="font-semibold">{manualAiExecution.totalSteps}</span>
+                    </p>
+                    {manualAiExecution.failureReason ? (
+                      <p className="mt-1 text-rose-700 dark:text-rose-300">
+                        Failure reason: {manualAiExecution.failureReason}
+                      </p>
+                    ) : null}
+                    {manualAiExecution.playwrightUiUrl ? (
+                      <p className="mt-1">
+                        Playwright UI:{" "}
+                        <a
+                          href={manualAiExecution.playwrightUiUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="font-mono text-[11px] text-sky-700 underline decoration-dotted underline-offset-2 hover:text-sky-800 dark:text-sky-300 dark:hover:text-sky-200"
+                        >
+                          {manualAiExecution.playwrightUiUrl}
+                        </a>
+                      </p>
+                    ) : null}
+                    {manualAiExecution.traceRef || manualAiExecution.videoRef || manualAiExecution.reportRef ? (
+                      <p className="mt-1 text-ink-600 dark:text-slate-300">
+                        Artifacts:{" "}
+                        <code>{manualAiExecution.reportRef ?? ""}</code>{" "}
+                        <code>{manualAiExecution.traceRef ?? ""}</code>{" "}
+                        <code>{manualAiExecution.videoRef ?? ""}</code>
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
                 {importError ? (
                   <p className="mt-3 rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-sm text-rose-700 dark:border-rose-900/50 dark:bg-rose-950/30 dark:text-rose-200" role="alert" aria-live="assertive">
                     {importError}
@@ -3765,7 +3957,7 @@ date: 2026-03-28
                       type="button"
                       onClick={() => void openRunFromHistory(run.id, run.status)}
                       disabled={busy}
-                      className="rounded-lg border border-brand-300 px-2 py-1 text-xs font-semibold text-brand-700 disabled:opacity-60 dark:border-brand-700 dark:text-brand-300"
+                      className="rounded-lg border border-slate-300 bg-white px-2 py-1 text-xs font-semibold text-slate-800 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
                     >
                       Open
                     </button>
@@ -3792,7 +3984,7 @@ date: 2026-03-28
                   type="button"
                   onClick={() => addCollaborator()}
                   disabled={busy}
-                  className="rounded-lg border border-brand-300 px-3 py-2 text-xs font-semibold text-brand-700 disabled:opacity-60 dark:border-brand-700 dark:text-brand-300"
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-800 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
                   data-testid="qa-collab-add"
                 >
                   Add
@@ -3843,7 +4035,7 @@ date: 2026-03-28
                   <button
                     type="button"
                     onClick={() => window.open(shareLink, "_blank", "noopener,noreferrer")}
-                    className="rounded-lg border border-brand-300 px-2 py-1 text-[11px] font-semibold text-brand-700 dark:border-brand-700 dark:text-brand-300"
+                    className="rounded-lg border border-slate-300 bg-white px-2 py-1 text-[11px] font-semibold text-slate-800 transition-colors hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
                     data-testid="qa-share-open"
                   >
                     Open Link
@@ -4053,7 +4245,7 @@ date: 2026-03-28
                             onClick={() => void markCaseDone()}
                             disabled={busy || !selectedCase}
                             data-testid="qa-mark-done"
-                            className="rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-60 min-h-[2.5rem] touch-manipulation"
+                            className="rounded-lg border border-sky-600 bg-sky-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-50 min-h-[2.5rem] touch-manipulation"
                           >
                             Mark Done
                           </button>
@@ -4061,7 +4253,7 @@ date: 2026-03-28
                             type="button"
                             onClick={() => void setCaseStatus("passed")}
                             disabled={busy || !selectedCase}
-                            className="rounded-lg border border-emerald-300 px-4 py-2.5 text-sm font-semibold text-emerald-800 disabled:opacity-60 dark:border-emerald-900/50 dark:text-emerald-300 min-h-[2.5rem] touch-manipulation"
+                            className="rounded-lg border border-emerald-300 bg-emerald-50 px-4 py-2.5 text-sm font-semibold text-emerald-900 transition-colors hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-200 dark:hover:bg-emerald-950/50 min-h-[2.5rem] touch-manipulation"
                           >
                             Mark Passed
                           </button>
@@ -4071,7 +4263,7 @@ date: 2026-03-28
                             type="button"
                             onClick={() => void setCaseStatus("failed")}
                             disabled={busy || !selectedCase}
-                            className="rounded-lg border border-rose-300 px-4 py-2.5 text-sm font-semibold text-rose-800 disabled:opacity-60 dark:border-rose-900/50 dark:text-rose-300 min-h-[2.5rem] touch-manipulation"
+                            className="rounded-lg border border-rose-300 bg-rose-50 px-4 py-2.5 text-sm font-semibold text-rose-900 transition-colors hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-rose-900/50 dark:bg-rose-950/30 dark:text-rose-200 dark:hover:bg-rose-950/50 min-h-[2.5rem] touch-manipulation"
                           >
                             Mark Failed
                           </button>
@@ -4079,7 +4271,7 @@ date: 2026-03-28
                             type="button"
                             onClick={() => void setCaseStatus("blocked")}
                             disabled={busy || !selectedCase}
-                            className="rounded-lg border border-amber-300 px-4 py-2.5 text-sm font-semibold text-amber-800 disabled:opacity-60 dark:border-amber-900/50 dark:text-amber-300 min-h-[2.5rem] touch-manipulation"
+                            className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm font-semibold text-amber-900 transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200 dark:hover:bg-amber-950/50 min-h-[2.5rem] touch-manipulation"
                           >
                             Mark Blocked
                           </button>
@@ -4213,7 +4405,7 @@ date: 2026-03-28
                           type="button"
                           onClick={() => addCaseComment()}
                           disabled={busy}
-                          className="w-full rounded-lg bg-brand-500 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-60 min-h-[2.5rem] touch-manipulation whitespace-nowrap lg:w-auto"
+                          className="w-full rounded-lg border border-sky-600 bg-sky-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-50 min-h-[2.5rem] touch-manipulation whitespace-nowrap lg:w-auto"
                           data-testid="qa-comment-add"
                         >
                           Post
@@ -4280,7 +4472,7 @@ date: 2026-03-28
                           type="button"
                           onClick={() => void addEvidence()}
                           disabled={busy}
-                          className="w-full rounded-lg bg-brand-500 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-60 min-h-[2.5rem] touch-manipulation whitespace-nowrap lg:w-auto"
+                          className="w-full rounded-lg border border-sky-600 bg-sky-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-50 min-h-[2.5rem] touch-manipulation whitespace-nowrap lg:w-auto"
                         >
                           Add
                         </button>
@@ -4291,7 +4483,7 @@ date: 2026-03-28
                           {selectedCase.result.evidence.map((item, index) => (
                             <li key={`${item.ref}-${index}`}>
                               <span className="font-semibold">{item.type}</span> · {item.label} ·{" "}
-                              <a className="text-brand-600 dark:text-brand-300" href={item.ref} target="_blank" rel="noreferrer">
+                              <a className="text-sky-700 underline decoration-sky-300 underline-offset-2 dark:text-sky-300 dark:decoration-sky-700" href={item.ref} target="_blank" rel="noreferrer">
                                 {item.ref}
                               </a>
                             </li>

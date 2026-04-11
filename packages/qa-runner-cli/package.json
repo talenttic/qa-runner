@@ -22,7 +22,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "echo 'no lint yet'",
-    "test": "node --test dist/core/__tests__/*.test.js"
+    "test": "node --test dist/core/__tests__/*.test.js && node --test dist/daemon/__tests__/*.test.js"
   },
   "dependencies": {
     "@talenttic/qa-runner-ui": "0.1.1"

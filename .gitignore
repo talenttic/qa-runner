@@ -22,3 +22,18 @@ storybook-static/
 
 # misc
 *.local
+
+# qa-runner runtime artifacts
+tools/qa-runner.db
+tools/qa-runner.manifest.json
+tools/qa-runner.manifest.baseline.json
+tools/qa-runner.report.json
+tools/qa-runner.kpi-report.json
+
+# qa-runner generated outputs
+docs/qa-cases/*__qa-generated.md
+e2e/generated/
+e2e/generated/*.ai-execution-plan.json
+e2e/generated/*.ai-execution-result.json
+e2e/generated/*.ai-validation.json
+e2e/generated/*.ai-generated.spec.ts
