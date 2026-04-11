@@ -197,6 +197,7 @@ export interface QaGenerationJob {
     review?: QaTestQualityReview;
     intelligentReview?: QaIntelligentReview;
     intelligentFixProposals?: QaIntelligentFixProposal[];
+    intelligentFixDiagnostics?: QaIntelligentFixDiagnostics;
     automation?: QaAutomationSummary;
   } | null;
   error: string | null;
@@ -297,6 +298,24 @@ export interface QaIntelligentFixProposal {
   retestAt?: string | null;
   retestError?: string | null;
   retestCommand?: string | null;
+  retestTargetPath?: string;
+}
+
+export interface QaIntelligentFixDiagnostics {
+  reason:
+    | "heuristic_static_match"
+    | "fallback_execution_match"
+    | "no_failed_execution_context"
+    | "no_matching_skill"
+    | "already_stabilized";
+  sourceExecutionJobId?: string | null;
+  inspectedOutputLines: number;
+  inspectedErrorContexts: number;
+  provider: "agent" | "local" | "remote";
+  supportsVision: boolean;
+  enabledSkillIds: string[];
+  generatedAt: string;
+  details?: string;
 }
 
 export interface QaAutomationSummary {
@@ -310,6 +329,20 @@ export interface QaAutomationSummary {
   failedRetests: number;
   remainingProposals: number;
   message: string;
+}
+
+export interface QaAutomationExecutionStatus {
+  id: string;
+  generationJobId: string;
+  strategy: QaAutomationStrategy;
+  status: "queued" | "running" | "completed" | "failed";
+  progressPercent: number;
+  totalProposals: number;
+  processedProposals: number;
+  currentStep: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  error: string | null;
 }
 
 export interface QaTestsLoadResult {
@@ -342,6 +375,15 @@ export interface QaAiExecuteResult {
   completedAt: string | null;
   playwrightCommand: string;
   playwrightUiUrl?: string;
+  progressPercent?: number;
+  totalTests?: number | null;
+  completedTests?: number;
+  currentTest?: string | null;
+  lastActivity?: string | null;
+  lastActivityAt?: string | null;
+  processAlive?: boolean;
+  stalled?: boolean;
+  outputLines?: string[];
   artifacts: {
     reportRef: string;
     traceRef: string;
@@ -356,6 +398,15 @@ export interface QaAiExecutionStatus {
   status: "queued" | "running" | "completed" | "failed" | "cancelled";
   playwrightCommand: string;
   playwrightUiUrl?: string | null;
+  progressPercent?: number;
+  totalTests?: number | null;
+  completedTests?: number;
+  currentTest?: string | null;
+  lastActivity?: string | null;
+  lastActivityAt?: string | null;
+  processAlive?: boolean;
+  stalled?: boolean;
+  outputLines?: string[];
   reportRef: string | null;
   traceRef: string | null;
   videoRef: string | null;
@@ -429,8 +480,18 @@ export interface QaMarkdownValidationReport {
 export interface QaRuntimeStatus {
   aiEnabled: boolean;
   playwrightUiEnabled?: boolean;
-  executionMode: "stub" | "shell";
+  videoTranscodeAvailable?: boolean;
+  executionMode: "stub" | "shell" | "ui" | "mcp";
   executionTimeoutMs: number;
+  mcp?: {
+    enabled: boolean;
+    transport: "http" | "stdio";
+    endpoint: string;
+    timeoutMs: number;
+    defaultVersionPin: string;
+    visibleBrowserExpected?: boolean;
+    visibleBrowserReason?: string;
+  };
   workspaceRoot?: string;
   casesRoot?: string;
   pomRuleMode?: "off" | "warn" | "strict";
@@ -443,6 +504,19 @@ export interface QaRuntimeStatus {
   executionIsolationMode?: "local_worker";
   qaDataScopeMode?: "global";
   extractionTiming?: "in_repo_until_v1";
+  aiProvider?: "agent" | "local" | "remote";
+  aiProviderFallbackChain?: Array<"agent" | "local" | "remote">;
+  aiProviderCapabilities?: Array<{
+    id: "agent" | "local" | "remote";
+    label: string;
+    enabled: boolean;
+    supportsVision: boolean;
+    supportsCodeEdit: boolean;
+    supportsToolUse: boolean;
+    supportsLongContext: boolean;
+    bestFor: string;
+    notes?: string;
+  }>;
 }
 
 export interface QaFlakinessRecord {

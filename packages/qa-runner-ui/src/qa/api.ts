@@ -2,6 +2,7 @@ import { apiFetch } from "../auth/apiFetch";
 import { API_URL } from "../config/runtime";
 import type {
   QaAutomationStrategy,
+  QaAutomationExecutionStatus,
   QaAiExecutionStatus,
   QaManualAiExecutionStatus,
   QaAiExecuteResult,
@@ -722,6 +723,7 @@ export const runQaIntelligentReview = async (input: {
 export const generateQaFixProposals = async (input: {
   generationJobId: string;
   maxProposals?: number;
+  sourceExecutionJobId?: string;
 }): Promise<QaGenerationJob> => {
   const response = await apiFetch(`${API_URL}/plugin/qa/tests/suggest-fixes`, {
     method: "POST",
@@ -780,6 +782,7 @@ export const runQaAutomation = async (input: {
   generationJobId: string;
   strategy: QaAutomationStrategy;
   maxIterations?: number;
+  sourceExecutionJobId?: string;
 }): Promise<QaGenerationJob> => {
   const response = await apiFetch(`${API_URL}/plugin/qa/tests/automation/run`, {
     method: "POST",
@@ -792,6 +795,38 @@ export const runQaAutomation = async (input: {
   const payload = (await response.json()) as { data?: QaGenerationJob };
   if (!payload.data) {
     throw new Error("Automation run response shape mismatch");
+  }
+  return payload.data;
+};
+
+export const startQaAutomationExecution = async (input: {
+  generationJobId: string;
+  strategy: QaAutomationStrategy;
+  maxIterations?: number;
+}): Promise<QaAutomationExecutionStatus> => {
+  const response = await apiFetch(`${API_URL}/plugin/qa/tests/automation/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  const payload = (await response.json()) as { data?: QaAutomationExecutionStatus };
+  if (!payload.data) {
+    throw new Error("Automation start response shape mismatch");
+  }
+  return payload.data;
+};
+
+export const fetchQaAutomationExecutionStatus = async (executionJobId: string): Promise<QaAutomationExecutionStatus> => {
+  const response = await apiFetch(`${API_URL}/plugin/qa/tests/automation/executions/${encodeURIComponent(executionJobId)}`);
+  if (!response.ok) {
+    throw await parseError(response);
+  }
+  const payload = (await response.json()) as { data?: QaAutomationExecutionStatus };
+  if (!payload.data) {
+    throw new Error("Automation status response shape mismatch");
   }
   return payload.data;
 };
