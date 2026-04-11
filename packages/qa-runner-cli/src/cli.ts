@@ -3,7 +3,13 @@ import fs from "node:fs";
 import path from "node:path";
 import http from "node:http";
 import { QaRunnerDaemon, startDaemonServer, startWatcher } from "./daemon/index.js";
-import type { ChangeEvent } from "./core/index.js";
+import {
+  categorizeHealingFailure,
+  createHealingAttempt,
+  decideHealingRetry,
+  type ChangeEvent,
+  type HealingAttempt,
+} from "./core/index.js";
 import { loadConfig, resolveOutputs } from "./config.js";
 import { parseAutoTestOverride, parseHealingOverride, resolveRuntimeProfile } from "./runtime-profile.js";
 import { spawnSync } from "node:child_process";
@@ -33,6 +39,550 @@ const parseRatePercent = (value: string | undefined): number | null => {
   if (!cleaned) return null;
   const parsed = Number(cleaned);
   return Number.isFinite(parsed) ? parsed : null;
+};
+
+const stripAnsi = (value: string): string => value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
+
+const extractTestPassthroughArgs = (inputArgs: string[]): string[] => {
+  const passthrough: string[] = [];
+  for (let index = 0; index < inputArgs.length; index += 1) {
+    const current = inputArgs[index]!;
+    if (
+      current === "--auto-test" ||
+      current === "--no-auto-test" ||
+      current === "--validate-manual-cases" ||
+      current === "--report-healing-stats" ||
+      current === "--suggest-fixes" ||
+      current === "--apply-suggested-fixes"
+    ) {
+      continue;
+    }
+    if (
+      current === "--env" ||
+      current === "--healing" ||
+      current === "--validate-healing-rate" ||
+      current === "--suggestions-output"
+    ) {
+      index += 1;
+      continue;
+    }
+    if (
+      current.startsWith("--env=") ||
+      current.startsWith("--healing=") ||
+      current.startsWith("--validate-healing-rate=") ||
+      current.startsWith("--suggestions-output=")
+    ) {
+      continue;
+    }
+    passthrough.push(current);
+  }
+  return passthrough;
+};
+
+const isPlaywrightCommand = (commandLine: string): boolean => {
+  const normalized = commandLine.toLowerCase();
+  return normalized.includes("playwright") || normalized.includes("e2e/ui");
+};
+
+const addCommandArgs = (cmd: string, baseArgs: string[], extraArgs: string[]): string[] => {
+  if (extraArgs.length === 0) {
+    return baseArgs;
+  }
+  if (cmd === "npm") {
+    return [...baseArgs, "--", ...extraArgs];
+  }
+  return [...baseArgs, ...extraArgs];
+};
+
+type PlaywrightFailureSnapshot = {
+  failedTargets: string[];
+  firstFailureMessage: string;
+  failures: Array<{
+    target: string;
+    message: string;
+    sourceFile?: string;
+    sourceLine?: number;
+    locatorHint?: string;
+  }>;
+};
+
+const parseFailureDetail = (
+  target: string,
+  rawMessage: string,
+  projectRoot: string,
+): {
+  target: string;
+  message: string;
+  sourceFile?: string;
+  sourceLine?: number;
+  locatorHint?: string;
+} => {
+  const cleaned = stripAnsi(rawMessage);
+  const absoluteMatch = cleaned.match(/\((\/[^():]+):(\d+):(\d+)\)/);
+  const relativeMatch = cleaned.match(/at\s+(\.\.?\/[^\s:]+):(\d+):(\d+)/);
+  let sourceFile: string | undefined;
+  let sourceLine: number | undefined;
+  if (absoluteMatch) {
+    sourceFile = absoluteMatch[1];
+    sourceLine = Number(absoluteMatch[2]);
+  } else if (relativeMatch) {
+    sourceFile = path.resolve(projectRoot, "e2e/ui/tests", relativeMatch[1]);
+    sourceLine = Number(relativeMatch[2]);
+  }
+  const locatorMatch = cleaned.match(/waiting for ([^\n]+)/i);
+  return {
+    target,
+    message: rawMessage,
+    sourceFile,
+    sourceLine: Number.isFinite(sourceLine ?? NaN) ? sourceLine : undefined,
+    locatorHint: locatorMatch?.[1]?.trim(),
+  };
+};
+
+const readPlaywrightFailureSnapshot = (reportPath: string): PlaywrightFailureSnapshot => {
+  if (!fs.existsSync(reportPath)) {
+    return { failedTargets: [], firstFailureMessage: "", failures: [] };
+  }
+  try {
+    const report = JSON.parse(fs.readFileSync(reportPath, "utf-8")) as {
+      suites?: Array<{
+        file?: string;
+        line?: number;
+        specs?: Array<{
+          file?: string;
+          line?: number;
+          tests?: Array<{
+            results?: Array<{
+              status?: string;
+              error?: { message?: string };
+              errors?: Array<{ message?: string }>;
+            }>;
+          }>;
+        }>;
+        suites?: Array<unknown>;
+      }>;
+    };
+    const failedTargets = new Set<string>();
+    let firstFailureMessage = "";
+    const failures: Array<{
+      target: string;
+      message: string;
+      sourceFile?: string;
+      sourceLine?: number;
+      locatorHint?: string;
+    }> = [];
+
+    const visitSuite = (suite: {
+      file?: string;
+      line?: number;
+      specs?: Array<{
+        file?: string;
+        line?: number;
+        tests?: Array<{
+          results?: Array<{
+            status?: string;
+            error?: { message?: string };
+            errors?: Array<{ message?: string }>;
+          }>;
+        }>;
+      }>;
+      suites?: Array<unknown>;
+    }) => {
+      for (const spec of suite.specs ?? []) {
+        const failedResult = spec.tests
+          ?.flatMap((test) => test.results ?? [])
+          .find((result) => result.status === "failed" || result.status === "timedOut" || result.status === "interrupted");
+        if (!failedResult) {
+          continue;
+        }
+        const file = spec.file ?? suite.file;
+        const line = Number(spec.line ?? suite.line ?? 0);
+        const target = file ? (line > 0 ? `${file}:${line}` : file) : "unknown";
+        if (file) {
+          failedTargets.add(target);
+        }
+        const messages = [
+          failedResult.error?.message,
+          ...(Array.isArray(failedResult.errors) ? failedResult.errors.map((item) => item?.message) : []),
+        ].filter((value): value is string => Boolean(value && value.trim()));
+        const primaryMessage = messages[0] ?? "unknown failure";
+        if (!firstFailureMessage && primaryMessage) {
+          firstFailureMessage = primaryMessage;
+        }
+        for (const message of messages.length > 0 ? messages : [primaryMessage]) {
+          failures.push(parseFailureDetail(target, message, process.cwd()));
+        }
+      }
+      for (const child of suite.suites ?? []) {
+        if (child && typeof child === "object") {
+          visitSuite(child as {
+            file?: string;
+            line?: number;
+            specs?: Array<{
+              file?: string;
+              line?: number;
+              tests?: Array<{
+                results?: Array<{
+                  status?: string;
+                  error?: { message?: string };
+                }>;
+              }>;
+            }>;
+            suites?: Array<unknown>;
+          });
+        }
+      }
+    };
+
+    for (const suite of report.suites ?? []) {
+      visitSuite(suite);
+    }
+
+    return {
+      failedTargets: Array.from(failedTargets),
+      firstFailureMessage,
+      failures,
+    };
+  } catch {
+    return { failedTargets: [], firstFailureMessage: "", failures: [] };
+  }
+};
+
+const buildFixSuggestion = (target: string, message: string): { category: string; recommendation: string } => {
+  const normalized = message.toLowerCase();
+  const waitingForRoleNameButton =
+    normalized.includes("timeout") &&
+    normalized.includes("waiting for getbyrole('button'") &&
+    normalized.includes("name:");
+  if (waitingForRoleNameButton) {
+    return {
+      category: "selector",
+      recommendation:
+        "Button role+name selector no longer matches current UI label. Update page-object locator to support renamed button labels with a fallback regex or data-testid.",
+    };
+  }
+  if (normalized.includes("econnrefused") || normalized.includes("connect") || normalized.includes("127.0.0.1")) {
+    return {
+      category: "environment",
+      recommendation:
+        "API/web server connection failed. Verify managed webservers are enabled, ports match runtime config, and tests do not hardcode stale API URLs.",
+    };
+  }
+  if (normalized.includes("timeout") && normalized.includes("waiting for")) {
+    return {
+      category: "timing",
+      recommendation:
+        "Replace brittle immediate click/assert with deterministic waits on visible+enabled state and completion signals. Add explicit guard for feature flags/prerequisites.",
+    };
+  }
+  if (normalized.includes("timeout")) {
+    return {
+      category: "timing",
+      recommendation:
+        "Action timed out. Add precondition checks and explicit readiness waits (visible, enabled, network response) before interacting.",
+    };
+  }
+  if (normalized.includes("element(s) not found") || normalized.includes("not found") || normalized.includes("locator")) {
+    return {
+      category: "selector",
+      recommendation:
+        "Selector appears stale. Prefer data-testid and role+name fallbacks, and update page object locators to match current UI contracts.",
+    };
+  }
+  return {
+    category: "unknown",
+    recommendation:
+      "Review trace/video and error context, then tighten selector strategy or environment setup based on first failing action.",
+  };
+};
+
+const writeHealingSuggestions = (
+  outputPath: string,
+  runtime: { env: string; strategy: string; retries: number },
+  failures: Array<{
+    target: string;
+    message: string;
+    sourceFile?: string;
+    sourceLine?: number;
+    locatorHint?: string;
+  }>,
+): void => {
+  const suggestions = failures.map((failure) => {
+    const suggestion = buildFixSuggestion(failure.target, failure.message);
+    return {
+      target: failure.target,
+      category: suggestion.category,
+      recommendation: suggestion.recommendation,
+      message: failure.message,
+      sourceFile: failure.sourceFile,
+      sourceLine: failure.sourceLine,
+      locatorHint: failure.locatorHint,
+    };
+  });
+  const payload = {
+    generatedAt: new Date().toISOString(),
+    runtime,
+    failureCount: failures.length,
+    suggestions,
+  };
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  fs.writeFileSync(outputPath, JSON.stringify(payload, null, 2), "utf-8");
+};
+
+const applyTimingFixes = (
+  failures: Array<{
+    target: string;
+    message: string;
+    sourceFile?: string;
+    sourceLine?: number;
+  }>,
+): Array<{ filePath: string; line: number; reason: string }> => {
+  const applied: Array<{ filePath: string; line: number; reason: string }> = [];
+  const grouped = new Map<string, Array<{ line: number; message: string }>>();
+  for (const failure of failures) {
+    if (!failure.sourceFile || !failure.sourceLine) continue;
+    const category = buildFixSuggestion(failure.target, failure.message).category;
+    if (category !== "timing") continue;
+    if (!grouped.has(failure.sourceFile)) grouped.set(failure.sourceFile, []);
+    grouped.get(failure.sourceFile)!.push({ line: failure.sourceLine, message: failure.message });
+  }
+  for (const [filePath, entries] of grouped.entries()) {
+    if (!fs.existsSync(filePath)) continue;
+    const original = fs.readFileSync(filePath, "utf-8");
+    const lines = original.split("\n");
+    const ordered = entries
+      .filter((entry) => entry.line > 0 && entry.line <= lines.length)
+      .sort((a, b) => b.line - a.line);
+    for (const entry of ordered) {
+      const idx = entry.line - 1;
+      const current = lines[idx] ?? "";
+      const match = current.match(/^(\s*)await\s+(.+?)\.click\((.*?)\);\s*$/);
+      if (!match) continue;
+      const indent = match[1] ?? "";
+      const receiver = match[2] ?? "";
+      const args = match[3] ?? "";
+      const prev = lines[Math.max(0, idx - 1)] ?? "";
+      if (prev.includes(`${receiver}.waitFor(`)) {
+        continue;
+      }
+      const replacement: string[] = [
+        `${indent}await ${receiver}.waitFor({ state: "visible", timeout: 10000 });`,
+        `${indent}await ${receiver}.click(${args});`,
+      ];
+      lines.splice(idx, 1, ...replacement);
+      applied.push({ filePath, line: entry.line, reason: "timing_wait_before_click" });
+    }
+    if (applied.some((item) => item.filePath === filePath)) {
+      fs.writeFileSync(filePath, lines.join("\n"), "utf-8");
+    }
+  }
+  return applied;
+};
+
+const BUTTON_RENAME_ALIASES: Record<string, string[]> = {
+  "Generate Tests": ["Run Tests (Prepare + Execute)", "2) Run Tests (Prepare + Execute)", "Run tests with AI"],
+  "Load Tests": ["Load Existing Suite", "1) Load Existing Suite", "Step 1: Load existing Playwright suite"],
+};
+
+const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const parseRoleButtonNameFromFailure = (message: string): string | null => {
+  const cleaned = stripAnsi(message);
+  const single = cleaned.match(/getByRole\('button',\s*\{\s*name:\s*'([^']+)'\s*,\s*exact:\s*true\s*\}\)/i);
+  if (single?.[1]) return single[1].trim();
+  const dbl = cleaned.match(/getByRole\("button",\s*\{\s*name:\s*"([^"]+)"\s*,\s*exact:\s*true\s*\}\)/i);
+  if (dbl?.[1]) return dbl[1].trim();
+  return null;
+};
+
+const applyButtonRenameFallbackFixes = (
+  failures: Array<{
+    target: string;
+    message: string;
+    sourceFile?: string;
+  }>,
+): Array<{ filePath: string; line: number; reason: string }> => {
+  const applied: Array<{ filePath: string; line: number; reason: string }> = [];
+  const buttonNames = new Set<string>();
+  for (const failure of failures) {
+    if (buildFixSuggestion(failure.target, failure.message).category !== "selector") continue;
+    const buttonName = parseRoleButtonNameFromFailure(failure.message);
+    if (buttonName) buttonNames.add(buttonName);
+  }
+  if (buttonNames.size === 0) return applied;
+
+  const knownRenames = Array.from(buttonNames).filter((name) => Array.isArray(BUTTON_RENAME_ALIASES[name]));
+  if (knownRenames.length === 0) return applied;
+
+  const candidateFiles = new Set<string>();
+  for (const failure of failures) {
+    if (failure.sourceFile && fs.existsSync(failure.sourceFile)) candidateFiles.add(failure.sourceFile);
+  }
+
+  for (const filePath of candidateFiles) {
+    const original = fs.readFileSync(filePath, "utf-8");
+    const lines = original.split("\n");
+    let changed = false;
+    for (let i = 0; i < lines.length; i += 1) {
+      const line = lines[i] ?? "";
+      for (const originalName of knownRenames) {
+        const aliases = BUTTON_RENAME_ALIASES[originalName];
+        const singleQuotedNeedle = `name: '${originalName}', exact: true`;
+        const doubleQuotedNeedle = `name: "${originalName}", exact: true`;
+        if (!line.includes(singleQuotedNeedle) && !line.includes(doubleQuotedNeedle)) continue;
+        if (!line.includes("getByRole('button'") && !line.includes('getByRole("button"')) continue;
+        if (line.includes("name: /")) continue;
+        const variants = [originalName, ...aliases].map((name) => escapeRegExp(name));
+        const regexLiteral = `name: /${variants.join("|")}/`;
+        lines[i] = line
+          .replace(singleQuotedNeedle, `${regexLiteral}`)
+          .replace(doubleQuotedNeedle, `${regexLiteral}`);
+        changed = true;
+        applied.push({ filePath, line: i + 1, reason: "selector_button_label_fallback" });
+        break;
+      }
+    }
+    if (changed) {
+      fs.writeFileSync(filePath, lines.join("\n"), "utf-8");
+    }
+  }
+
+  return applied;
+};
+
+const applyDisabledButtonPrereqFixes = (
+  failures: Array<{
+    target: string;
+    message: string;
+    sourceFile?: string;
+    sourceLine?: number;
+  }>,
+): Array<{ filePath: string; line: number; reason: string }> => {
+  const applied: Array<{ filePath: string; line: number; reason: string }> = [];
+  const grouped = new Map<string, Array<{ line: number; message: string }>>();
+  for (const failure of failures) {
+    if (!failure.sourceFile || !failure.sourceLine) continue;
+    const normalized = stripAnsi(failure.message).toLowerCase();
+    if (!normalized.includes("element is not enabled")) continue;
+    if (!normalized.includes("step 2: run tests")) continue;
+    if (!grouped.has(failure.sourceFile)) grouped.set(failure.sourceFile, []);
+    grouped.get(failure.sourceFile)!.push({ line: failure.sourceLine, message: failure.message });
+  }
+
+  for (const [filePath, entries] of grouped.entries()) {
+    if (!fs.existsSync(filePath)) continue;
+    const original = fs.readFileSync(filePath, "utf-8");
+    const lines = original.split("\n");
+    const ordered = entries
+      .filter((entry) => entry.line > 0 && entry.line <= lines.length)
+      .sort((a, b) => b.line - a.line);
+    for (const entry of ordered) {
+      const idx = entry.line - 1;
+      const current = lines[idx] ?? "";
+      const match = current.match(/^(\s*)await\s+(.+?)\.click\((.*?)\);\s*$/);
+      if (!match) continue;
+      const indent = match[1] ?? "";
+      const receiver = match[2] ?? "";
+      const args = match[3] ?? "";
+      const prevBlock = lines.slice(Math.max(0, idx - 8), idx).join("\n");
+      if (prevBlock.includes("loadExistingSuiteButton")) continue;
+      const replacement: string[] = [
+        `${indent}const loadExistingSuiteButton = this.page.getByRole('button', {`,
+        `${indent}  name: /Load Existing Suite|Step 1: Load existing Playwright suite|1\\) Load Existing Suite/,`,
+        `${indent}});`,
+        `${indent}if (await loadExistingSuiteButton.isVisible().catch(() => false)) {`,
+        `${indent}  if (!(await loadExistingSuiteButton.isDisabled().catch(() => true))) {`,
+        `${indent}    await loadExistingSuiteButton.click();`,
+        `${indent}  }`,
+        `${indent}}`,
+        `${indent}await expect(${receiver}).toBeEnabled({ timeout: 15000 });`,
+        `${indent}await ${receiver}.click(${args});`,
+      ];
+      lines.splice(idx, 1, ...replacement);
+      applied.push({ filePath, line: entry.line, reason: "workflow_step_unlock_before_click" });
+    }
+    if (applied.some((item) => item.filePath === filePath)) {
+      fs.writeFileSync(filePath, lines.join("\n"), "utf-8");
+    }
+  }
+
+  return applied;
+};
+
+const applyAssertionTextFallbackFixes = (
+  failures: Array<{
+    target: string;
+    message: string;
+    sourceFile?: string;
+    sourceLine?: number;
+  }>,
+): Array<{ filePath: string; line: number; reason: string }> => {
+  const applied: Array<{ filePath: string; line: number; reason: string }> = [];
+  const grouped = new Map<string, Array<number>>();
+  for (const failure of failures) {
+    if (!failure.sourceFile || !failure.sourceLine) continue;
+    const normalized = stripAnsi(failure.message).toLowerCase();
+    if (!normalized.includes("element(s) not found")) continue;
+    if (!normalized.includes("generated tests at")) continue;
+    if (!grouped.has(failure.sourceFile)) grouped.set(failure.sourceFile, []);
+    grouped.get(failure.sourceFile)!.push(failure.sourceLine);
+  }
+
+  for (const [filePath, linesToInspect] of grouped.entries()) {
+    if (!fs.existsSync(filePath)) continue;
+    const original = fs.readFileSync(filePath, "utf-8");
+    const lines = original.split("\n");
+    const ordered = Array.from(new Set(linesToInspect))
+      .filter((line) => line > 0 && line <= lines.length)
+      .sort((a, b) => b - a);
+    for (const lineNumber of ordered) {
+      const idx = lineNumber - 1;
+      const current = lines[idx] ?? "";
+      if (!current.includes("generated tests at")) continue;
+      if (current.includes("Loaded tests:")) continue;
+      const next = current.replace(
+        "hasText: 'generated tests at'",
+        "hasText: /generated tests at|Loaded tests:/i",
+      );
+      if (next !== current) {
+        lines[idx] = next;
+        applied.push({ filePath, line: lineNumber, reason: "assertion_text_fallback" });
+      }
+    }
+    if (applied.some((item) => item.filePath === filePath)) {
+      fs.writeFileSync(filePath, lines.join("\n"), "utf-8");
+    }
+  }
+
+  return applied;
+};
+
+const upsertHealingAttempts = (manifestPath: string, attempts: HealingAttempt[]): void => {
+  if (attempts.length === 0) {
+    return;
+  }
+  let payload: Record<string, unknown> = {};
+  if (fs.existsSync(manifestPath)) {
+    try {
+      payload = JSON.parse(fs.readFileSync(manifestPath, "utf-8")) as Record<string, unknown>;
+    } catch {
+      payload = {};
+    }
+  }
+  const healing = (payload.healing as Record<string, unknown> | undefined) ?? {};
+  const existingAttempts = Array.isArray(healing.attempts) ? (healing.attempts as Array<Record<string, unknown>>) : [];
+  const mergedAttempts = [...existingAttempts, ...attempts] as Array<Record<string, unknown>>;
+  const recoveredAttempts = mergedAttempts.filter((attempt) => Boolean(attempt.recovered)).length;
+  payload.healing = {
+    ...healing,
+    attempts: mergedAttempts,
+    summary: {
+      totalAttempts: mergedAttempts.length,
+      recoveredAttempts,
+      lastAttemptAt: mergedAttempts[mergedAttempts.length - 1]?.occurredAt ?? new Date().toISOString(),
+    },
+  };
+  fs.writeFileSync(manifestPath, JSON.stringify(payload, null, 2), "utf-8");
 };
 
 const readManifestStats = (manifestPath: string): {
@@ -527,7 +1077,11 @@ if (command === "generate") {
     },
   });
   const reportHealingStats = args.includes("--report-healing-stats");
+  const suggestFixes = args.includes("--suggest-fixes");
+  const applySuggestedFixes = args.includes("--apply-suggested-fixes");
+  const suggestionsOutputPath = parseFlag("--suggestions-output") ?? path.join(cwd, "tools", "qa-runner.healing-suggestions.json");
   const validateHealingRate = parseRatePercent(parseFlag("--validate-healing-rate"));
+  const passthroughArgs = extractTestPassthroughArgs(args.slice(1));
   const hasUiPackage = fs.existsSync(path.join(cwd, "e2e", "ui", "package.json"));
   const commandLine = config.tests?.command ?? (hasUiPackage ? "npm --prefix e2e/ui test" : "");
   if (!commandLine) {
@@ -545,6 +1099,12 @@ if (command === "generate") {
     process.exit(0);
   }
   const [cmd, ...cmdArgs] = commandLine.split(" ").filter(Boolean);
+  const playwrightJsonDir = path.join(cwd, "tools", ".qa-runner", "playwright");
+  const playwrightPrimaryJsonName = "primary.json";
+  const isPlaywright = isPlaywrightCommand(commandLine);
+  const baseRunnerArgs = isPlaywright
+    ? addCommandArgs(cmd, cmdArgs, [...passthroughArgs, "--reporter=list,json"])
+    : addCommandArgs(cmd, cmdArgs, passthroughArgs);
   const env = {
     ...process.env,
     QA_RUNNER_ENV: runtimeEnv,
@@ -555,12 +1115,101 @@ if (command === "generate") {
         ? "unlimited"
         : String(runtimeProfile.healingRetryBudget),
     QA_RUNNER_VALIDATE_MANUAL_CASES: validateManualCases ? "1" : "0",
+    PLAYWRIGHT_JSON_OUTPUT_DIR: playwrightJsonDir,
+    PLAYWRIGHT_JSON_OUTPUT_NAME: playwrightPrimaryJsonName,
   };
   if (validateManualCases) {
     console.log("qa-runner manual case validation mode enabled (QA_RUNNER_VALIDATE_MANUAL_CASES=1)");
   }
-  const result = spawnSync(cmd, cmdArgs, { stdio: "inherit", env });
+  fs.mkdirSync(playwrightJsonDir, { recursive: true });
+  const result = spawnSync(cmd, baseRunnerArgs, { stdio: "inherit", env });
   let exitCode = result.status ?? 1;
+  const healingAttempts: HealingAttempt[] = [];
+  const suggestionFailures: Array<{
+    target: string;
+    message: string;
+    sourceFile?: string;
+    sourceLine?: number;
+    locatorHint?: string;
+  }> = [];
+
+  if (exitCode !== 0 && isPlaywright) {
+    const maxHealingRetries = Math.max(
+      0,
+      Math.min(3, runtimeProfile.healingRetryBudget >= Number.MAX_SAFE_INTEGER ? 3 : runtimeProfile.healingRetryBudget),
+    );
+    const configRetryBudget = maxHealingRetries === 0 ? 0 : maxHealingRetries;
+    let lastSnapshot = readPlaywrightFailureSnapshot(path.join(playwrightJsonDir, playwrightPrimaryJsonName));
+    suggestionFailures.push(...lastSnapshot.failures);
+    for (let attempt = 0; attempt < maxHealingRetries; attempt += 1) {
+      if (lastSnapshot.failedTargets.length === 0) {
+        break;
+      }
+      const retryDecision = decideHealingRetry(attempt, { retryBudget: configRetryBudget });
+      if (!retryDecision.shouldRetry) {
+        break;
+      }
+      const retryJsonName = `healing-attempt-${attempt + 1}.json`;
+      const retryEnv = {
+        ...env,
+        PLAYWRIGHT_JSON_OUTPUT_NAME: retryJsonName,
+      };
+      const retryArgs = addCommandArgs(cmd, cmdArgs, [
+        ...passthroughArgs,
+        ...lastSnapshot.failedTargets,
+        "--workers=1",
+        "--retries=0",
+        "--reporter=list,json",
+      ]);
+      const retryResult = spawnSync(cmd, retryArgs, { stdio: "inherit", env: retryEnv });
+      const recovered = (retryResult.status ?? 1) === 0;
+      healingAttempts.push(
+        createHealingAttempt({
+          testId: lastSnapshot.failedTargets.join(","),
+          recovered,
+          strategy: runtimeProfile.healingStrategy,
+          category: categorizeHealingFailure(lastSnapshot.firstFailureMessage || "unknown"),
+        }),
+      );
+      if (recovered) {
+        exitCode = 0;
+        break;
+      }
+      lastSnapshot = readPlaywrightFailureSnapshot(path.join(playwrightJsonDir, retryJsonName));
+      suggestionFailures.push(...lastSnapshot.failures);
+    }
+  }
+  upsertHealingAttempts(outputs.manifestPath, healingAttempts);
+  if (suggestFixes && suggestionFailures.length > 0) {
+    const uniqueFailures = Array.from(
+      new Map(suggestionFailures.map((failure) => [`${failure.target}:${failure.message}`, failure])).values(),
+    );
+    writeHealingSuggestions(
+      suggestionsOutputPath,
+      {
+        env: runtimeEnv,
+        strategy: runtimeProfile.healingStrategy,
+        retries: healingAttempts.length,
+      },
+      uniqueFailures,
+    );
+    console.log(`qa-runner healing suggestions written to ${suggestionsOutputPath}`);
+  }
+  if (applySuggestedFixes && suggestionFailures.length > 0) {
+    const applied = [
+      ...applyTimingFixes(suggestionFailures),
+      ...applyButtonRenameFallbackFixes(suggestionFailures),
+      ...applyDisabledButtonPrereqFixes(suggestionFailures),
+      ...applyAssertionTextFallbackFixes(suggestionFailures),
+    ];
+    if (applied.length === 0) {
+      console.log("qa-runner apply-fixes: no safe automatic patch candidates found.");
+    } else {
+      for (const patch of applied) {
+        console.log(`qa-runner apply-fixes: patched ${patch.filePath}:${patch.line} (${patch.reason})`);
+      }
+    }
+  }
 
   const healing = readManifestStats(outputs.manifestPath);
   if (reportHealingStats) {

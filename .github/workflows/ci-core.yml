@@ -35,3 +35,78 @@ jobs:
 
       - name: Core Tests
         run: npm run test -w @talenttic/qa-runner
+
+  qa-dogfood:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: "npm"
+
+      - name: Install
+        run: npm ci
+
+      - name: Build QA Runner CLI
+        run: npm run build -w @talenttic/qa-runner
+
+      - name: Create Dogfood Playwright Project
+        run: |
+          mkdir -p e2e/ui/tests
+          cat > e2e/ui/package.json <<'JSON'
+          {
+            "name": "qa-runner-dogfood-e2e-ui",
+            "private": true,
+            "version": "0.0.0",
+            "scripts": {
+              "test": "playwright test --config playwright.config.ts"
+            },
+            "devDependencies": {
+              "@playwright/test": "^1.52.0"
+            }
+          }
+          JSON
+          cat > e2e/ui/playwright.config.ts <<'TS'
+          import { defineConfig } from "@playwright/test";
+          export default defineConfig({
+            testDir: "./tests",
+            workers: 1,
+            retries: 0,
+            use: {
+              headless: true,
+            },
+          });
+          TS
+          cat > e2e/ui/tests/self-healing-flaky.spec.ts <<'TS'
+          import fs from "node:fs";
+          import path from "node:path";
+          import { test, expect } from "@playwright/test";
+
+          test("dogfood self-healing retry path", async () => {
+            const marker = path.join(process.cwd(), ".qa-runner-heal-once.marker");
+            if (!fs.existsSync(marker)) {
+              fs.writeFileSync(marker, "created", "utf-8");
+              expect(false, "intentional first-run failure to verify healing retry").toBe(true);
+            }
+            expect(true).toBe(true);
+          });
+          TS
+
+      - name: Install Playwright and Browser
+        run: |
+          npm install --prefix e2e/ui
+          npx --prefix e2e/ui playwright install chromium
+
+      - name: Run QA Runner Dogfood Test Pipeline
+        run: npx qa-runner test --env stage --auto-test --healing=moderate --report-healing-stats
+
+      - name: Upload QA Runner Manifest
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-runner-manifest
+          path: tools/qa-runner.manifest.json

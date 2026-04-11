@@ -1,0 +1,122 @@
+name: Manual AI Smoke
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build QA Runner CLI
+        run: npm run build -w @talenttic/qa-runner
+
+      - name: Install Playwright runtime project
+        run: |
+          mkdir -p .tmp/manual-ai-playwright
+          cat > .tmp/manual-ai-playwright/package.json <<'JSON'
+          {
+            "name": "manual-ai-playwright-smoke",
+            "private": true,
+            "version": "0.0.0",
+            "dependencies": {
+              "playwright": "^1.52.0"
+            }
+          }
+          JSON
+          npm install --prefix .tmp/manual-ai-playwright
+          npx --prefix .tmp/manual-ai-playwright playwright install --with-deps chromium
+
+      - name: Seed manual AI smoke checklist
+        run: |
+          mkdir -p docs/qa-cases
+          cat > docs/qa-cases/2026-04-11__manual-ai-smoke.md <<'MD'
+          # Manual AI Smoke Suite
+          
+          ## [smoke] Example domain visible
+          Use Case: Verify manual AI Playwright execution can open and validate a public page.
+          Expected: Example Domain text is visible.
+          Priority: high
+          ### Steps
+          1. Open https://example.com
+          2. Verify Example Domain
+          3. Verify URL contains example.com
+          MD
+
+      - name: Start daemon UI server
+        env:
+          QA_RUNNER_PLAYWRIGHT_PROJECT_DIR: .tmp/manual-ai-playwright
+          QA_RUNNER_PLAYWRIGHT_EXECUTION_MODE: shell
+        run: |
+          node packages/qa-runner-cli/dist/cli.js ui --port 4545 > .tmp/manual-ai-daemon.log 2>&1 &
+          for i in $(seq 1 40); do
+            if curl -sf http://127.0.0.1:4545/plugin/qa/suites >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Daemon failed to start"
+          cat .tmp/manual-ai-daemon.log || true
+          exit 1
+
+      - name: Run manual AI checklist
+        env:
+          QA_RUNNER_PLAYWRIGHT_PROJECT_DIR: .tmp/manual-ai-playwright
+          QA_RUNNER_PLAYWRIGHT_EXECUTION_MODE: shell
+        run: |
+          suite_id="$(curl -sf http://127.0.0.1:4545/plugin/qa/suites | jq -r '.data[] | select(.name=="Manual AI Smoke Suite") | .id' | head -n1)"
+          if [ -z "$suite_id" ]; then
+            echo "Could not find smoke suite id"
+            exit 1
+          fi
+          
+          run_id="$(curl -sf -X POST http://127.0.0.1:4545/plugin/qa/runs \
+            -H 'content-type: application/json' \
+            -d "{\"suiteId\":\"$suite_id\",\"mode\":\"manual\"}" | jq -r '.data.id')"
+          if [ -z "$run_id" ] || [ "$run_id" = "null" ]; then
+            echo "Could not create run"
+            exit 1
+          fi
+          
+          exec_id="$(curl -sf -X POST "http://127.0.0.1:4545/plugin/qa/runs/$run_id/manual/ai/execute" | jq -r '.data.executionJobId')"
+          if [ -z "$exec_id" ] || [ "$exec_id" = "null" ]; then
+            echo "Could not create manual AI execution"
+            exit 1
+          fi
+          
+          status=""
+          reason=""
+          for i in $(seq 1 120); do
+            payload="$(curl -sf "http://127.0.0.1:4545/plugin/qa/runs/$run_id/manual/ai/executions/$exec_id")"
+            status="$(echo "$payload" | jq -r '.data.status')"
+            reason="$(echo "$payload" | jq -r '.data.failureReason // ""')"
+            if [ "$status" = "completed" ] || [ "$status" = "failed" ] || [ "$status" = "cancelled" ]; then
+              break
+            fi
+            sleep 1
+          done
+          
+          echo "Manual AI execution status: $status"
+          if [ "$status" != "completed" ]; then
+            echo "Failure reason: $reason"
+            curl -sf "http://127.0.0.1:4545/plugin/qa/runs/$run_id" | jq .
+            exit 1
+          fi
+
+      - name: Dump daemon log on failure
+        if: failure()
+        run: cat .tmp/manual-ai-daemon.log || true
