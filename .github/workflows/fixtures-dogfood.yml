@@ -1,0 +1,30 @@
+name: Fixtures Dogfood
+
+on:
+  workflow_dispatch:
+
+jobs:
+  fixtures:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - fixture: node-api
+            script: fixtures:dogfood:node
+          - fixture: react-web
+            script: fixtures:dogfood:react
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Run fixture dogfood
+        run: npm run ${{ matrix.script }}

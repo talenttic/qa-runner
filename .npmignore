@@ -17,3 +17,7 @@ tools/qa-runner.plugins.json
 
 # Local QA cases (do not ship with package)
 docs/qa-cases
+
+# Local fixture apps and dogfood scripts
+fixtures
+scripts/run-fixture-dogfood.mjs

@@ -9,6 +9,10 @@ jobs:
   smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [shell, mcp]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,6 +45,21 @@ jobs:
           npm install --prefix .tmp/manual-ai-playwright
           npx --prefix .tmp/manual-ai-playwright playwright install --with-deps chromium
 
+      - name: Start Playwright MCP server
+        if: matrix.mode == 'mcp'
+        run: |
+          npx -y @playwright/mcp@0.0.70 --headless --isolated --browser chromium --port 8931 > .tmp/manual-ai-mcp.log 2>&1 &
+          for i in $(seq 1 40); do
+            code="$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8931/mcp || true)"
+            if [ "$code" = "400" ] || [ "$code" = "403" ]; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "MCP server failed to start"
+          cat .tmp/manual-ai-mcp.log || true
+          exit 1
+
       - name: Seed manual AI smoke checklist
         run: |
           mkdir -p docs/qa-cases
@@ -60,7 +79,9 @@ jobs:
       - name: Start daemon UI server
         env:
           QA_RUNNER_PLAYWRIGHT_PROJECT_DIR: .tmp/manual-ai-playwright
-          QA_RUNNER_PLAYWRIGHT_EXECUTION_MODE: shell
+          QA_RUNNER_PLAYWRIGHT_EXECUTION_MODE: ${{ matrix.mode }}
+          QA_RUNNER_PLAYWRIGHT_MCP_TRANSPORT: http
+          QA_RUNNER_PLAYWRIGHT_MCP_URL: http://localhost:8931/mcp
         run: |
           node packages/qa-runner-cli/dist/cli.js ui --port 4545 > .tmp/manual-ai-daemon.log 2>&1 &
           for i in $(seq 1 40); do
@@ -76,7 +97,9 @@ jobs:
       - name: Run manual AI checklist
         env:
           QA_RUNNER_PLAYWRIGHT_PROJECT_DIR: .tmp/manual-ai-playwright
-          QA_RUNNER_PLAYWRIGHT_EXECUTION_MODE: shell
+          QA_RUNNER_PLAYWRIGHT_EXECUTION_MODE: ${{ matrix.mode }}
+          QA_RUNNER_PLAYWRIGHT_MCP_TRANSPORT: http
+          QA_RUNNER_PLAYWRIGHT_MCP_URL: http://localhost:8931/mcp
         run: |
           suite_id="$(curl -sf http://127.0.0.1:4545/plugin/qa/suites | jq -r '.data[] | select(.name=="Manual AI Smoke Suite") | .id' | head -n1)"
           if [ -z "$suite_id" ]; then
@@ -119,4 +142,6 @@ jobs:
 
       - name: Dump daemon log on failure
         if: failure()
-        run: cat .tmp/manual-ai-daemon.log || true
+        run: |
+          cat .tmp/manual-ai-daemon.log || true
+          cat .tmp/manual-ai-mcp.log || true

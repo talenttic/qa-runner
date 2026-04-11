@@ -22,6 +22,12 @@
     "qa:kpi": "npx qa-runner report --kpi --baseline-manifest tools/qa-runner.manifest.baseline.json",
     "qa:kpi:enforce": "npx qa-runner report --kpi --baseline-manifest tools/qa-runner.manifest.baseline.json --enforce-kpi",
     "qa:demo": "npx qa-runner demo",
+    "dev:daemon:watch": "tsx watch packages/qa-runner-cli/src/cli.ts ui --port ${QA_RUNNER_DAEMON_PORT:-4545}",
+    "dev:ui": "npm run dev -w @talenttic/qa-runner-ui -- --port ${QA_RUNNER_UI_DEV_PORT:-2173} --strictPort",
+    "dev:all": "node scripts/dev-all.mjs",
+    "fixtures:dogfood:node": "node scripts/run-fixture-dogfood.mjs node-api",
+    "fixtures:dogfood:react": "node scripts/run-fixture-dogfood.mjs react-web",
+    "fixtures:dogfood": "npm run fixtures:dogfood:node && npm run fixtures:dogfood:react",
     "build": "npm run build -w @talenttic/qa-runner-ui && npm run build -w @talenttic/qa-runner && npm run build -w @talenttic/qa-runner-daemon",
     "changeset": "changeset",
     "version-packages": "changeset version",
@@ -33,6 +39,7 @@
   "devDependencies": {
     "@changesets/cli": "^2.27.7",
     "@types/node": "^22.13.5",
+    "tsx": "^4.20.6",
     "typescript": "^5.6.3"
   }
 }

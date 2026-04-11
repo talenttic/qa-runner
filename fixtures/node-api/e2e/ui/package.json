@@ -1,0 +1,12 @@
+{
+  "name": "qa-runner-fixture-node-api-e2e",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "test": "playwright test --config playwright.config.ts"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.52.0",
+    "typescript": "^5.6.3"
+  }
+}
