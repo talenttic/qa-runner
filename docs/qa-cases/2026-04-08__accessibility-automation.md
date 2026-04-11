@@ -7,12 +7,13 @@ date: 2026-04-08
 - Status: not_started
 - Tester:
 - CompletedAt:
-- Use Case: Developers can run automated accessibility checks.
-- Expected: The a11y test suite passes with no violations.
+- Use Case: Manual AI runner can navigate the QA Runner UI and execute deterministic click/verify checks.
+- Expected: MCP opens the UI, clicks between sections, and verifies visible labels without failures.
 - Notes:
 - FailureReason:
 ### Steps
-- [ ] From `packages/qa-runner-ui`, run `npm run test:a11y`.
-- [ ] Verify the test completes without errors.
-- [ ] If failures occur, inspect the reported violations.
-- [ ] Verify expected result: a11y checks run successfully.
+- [ ] Open base URL
+- [ ] Click AI Testing
+- [ ] Verify AI Testing
+- [ ] Click Manual Testing
+- [ ] Verify QA Runner

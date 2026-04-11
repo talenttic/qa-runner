@@ -23,6 +23,7 @@ export function generateCasesFromPrompt(input: {
   const normalizedPrompt = prompt.length > 140 ? `${prompt.slice(0, 137)}...` : prompt;
   const suiteName = `Generated QA - ${focusHint}`;
   const basePrefix = normalizedPrompt || "User flow";
+  const openStep = "Open base URL";
   return {
     suiteName,
     cases: [
@@ -31,7 +32,14 @@ export function generateCasesFromPrompt(input: {
         useCase: `${basePrefix}: execute intended success path end-to-end.`,
         expectedResult: "Flow completes successfully and target state is visible.",
         priority: "high",
-        steps: ["Open target screen", "Complete required user actions", "Verify success outcome"],
+        steps: [
+          openStep,
+          "Verify no JavaScript errors",
+          "Verify no failed network requests",
+          "Verify URL contains /",
+          "Verify no JavaScript errors",
+          "Verify no failed network requests",
+        ],
         playwrightTags: ["@smoke", "@generated"],
       },
       {
@@ -39,7 +47,15 @@ export function generateCasesFromPrompt(input: {
         useCase: `${basePrefix}: validate invalid or incomplete input handling.`,
         expectedResult: "Validation message is shown and action is blocked.",
         priority: "medium",
-        steps: ["Enter invalid or partial input", "Submit action", "Verify clear validation feedback"],
+        steps: [
+          openStep,
+          "Verify URL contains /",
+          "Verify no JavaScript errors",
+          "Verify no failed network requests",
+          "Verify URL contains /",
+          "Verify no JavaScript errors",
+          "Verify no failed network requests",
+        ],
         playwrightTags: ["@generated", "@validation"],
       },
       {
@@ -47,7 +63,14 @@ export function generateCasesFromPrompt(input: {
         useCase: `${basePrefix}: recover from transient failure and retry.`,
         expectedResult: "User can retry and successfully complete the flow.",
         priority: "medium",
-        steps: ["Trigger a recoverable failure", "Use retry/reload action", "Verify flow completes after retry"],
+        steps: [
+          openStep,
+          "Verify URL contains /",
+          "Verify no JavaScript errors",
+          "Verify no failed network requests",
+          openStep,
+          "Verify URL contains /",
+        ],
         playwrightTags: ["@generated", "@resilience"],
       },
     ],

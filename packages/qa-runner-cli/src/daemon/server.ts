@@ -9,6 +9,8 @@ import { QaRunnerDaemon, type DaemonConfig, type GenerationOutcome } from "./dae
 import { validateChangeEvent, type ChangeEvent } from "../core/index.js";
 import { getUiAssetDir } from "@talenttic/qa-runner-ui";
 import { spawn, spawnSync } from "node:child_process";
+import { buildSelfHealProposalsFromExecution, listEnabledSelfHealSkillIds } from "./selfHealSkills.js";
+import { PlaywrightMcpClient, type McpTransportMode } from "./playwrightMcpClient.js";
 
 export type ServerConfig = {
   port: number;
@@ -106,7 +108,24 @@ type QaGenerationJob = {
       retestAt?: string | null;
       retestError?: string | null;
       retestCommand?: string | null;
+      retestTargetPath?: string;
     }>;
+    intelligentFixDiagnostics?: {
+      reason:
+        | "heuristic_static_match"
+        | "fallback_execution_match"
+        | "no_failed_execution_context"
+        | "no_matching_skill"
+        | "already_stabilized";
+      sourceExecutionJobId?: string | null;
+      inspectedOutputLines: number;
+      inspectedErrorContexts: number;
+      provider: "agent" | "local" | "remote";
+      supportsVision: boolean;
+      enabledSkillIds: string[];
+      generatedAt: string;
+      details?: string;
+    };
     automation?: {
       strategy: "continuous_fix" | "alert_only";
       status: "fixed" | "partial" | "attention" | "clean";
@@ -132,6 +151,18 @@ type QaAiExecutionJob = {
   playwrightCommand: string;
   executionMode?: "stub" | "shell" | "ui";
   playwrightUiUrl?: string | null;
+  progressPercent: number;
+  totalTests: number | null;
+  completedTests: number;
+  currentTest: string | null;
+  lastActivity: string | null;
+  lastActivityAt: string | null;
+  processAlive: boolean;
+  outputLines: string[];
+  reportRootDir: string | null;
+  traceFilePath: string | null;
+  videoFilePath: string | null;
+  videoMp4FilePath: string | null;
   reportRef: string | null;
   traceRef: string | null;
   videoRef: string | null;
@@ -142,10 +173,65 @@ type QaAiExecutionJob = {
   updatedAt: string;
 };
 
+type QaAutomationExecutionJob = {
+  id: string;
+  generationJobId: string;
+  strategy: "continuous_fix" | "alert_only";
+  status: "queued" | "running" | "completed" | "failed";
+  progressPercent: number;
+  totalProposals: number;
+  processedProposals: number;
+  currentStep: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+const stripAnsi = (value: string): string => value.replace(/\u001b\[[0-9;]*m/g, "");
+
+const parsePlaywrightProgress = (
+  outputLine: string,
+): {
+  totalTests?: number;
+  completedTests?: number;
+  currentTest?: string;
+} => {
+  const line = stripAnsi(outputLine).trim();
+  if (!line) {
+    return {};
+  }
+  const runningMatch = line.match(/Running\s+(\d+)\s+tests?/i);
+  if (runningMatch) {
+    return { totalTests: Number(runningMatch[1]) };
+  }
+  const testProgressMatch = line.match(/\[(\d+)\/(\d+)\]\s+(.+)$/);
+  if (testProgressMatch) {
+    const index = Number(testProgressMatch[1]);
+    const total = Number(testProgressMatch[2]);
+    return {
+      totalTests: Number.isFinite(total) ? total : undefined,
+      completedTests: Number.isFinite(index) ? Math.max(0, index - 1) : undefined,
+      currentTest: testProgressMatch[3]?.trim() || undefined,
+    };
+  }
+  const passedMatch = line.match(/(\d+)\s+passed/i);
+  if (passedMatch) {
+    return { completedTests: Number(passedMatch[1]) };
+  }
+  return {};
+};
+
 type QaManualAiExecutionJob = {
   id: string;
   runId: string;
   status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  executionMode: "stub" | "shell" | "ui" | "mcp";
+  mcpTransport?: McpTransportMode | null;
+  mcpEndpoint?: string | null;
+  mcpSessionId?: string | null;
+  mcpActionCount?: number;
   currentCaseId: string | null;
   currentStepId: string | null;
   currentStepIndex: number;
@@ -176,6 +262,20 @@ type QaWorkspaceProfile = {
   casesDir: string;
   gitUrl?: string;
   isDefault: boolean;
+};
+
+type QaMcpHealthState = {
+  enabled: boolean;
+  transport: McpTransportMode;
+  endpoint: string;
+  timeoutMs: number;
+  defaultVersionPin: string;
+  lastStatus: "idle" | "healthy" | "unhealthy";
+  lastCheckAt: string | null;
+  lastError: string | null;
+  lastSessionId: string | null;
+  lastActionCount: number;
+  lastExecutionJobId: string | null;
 };
 
 const readJsonBody = (req: IncomingMessage): Promise<unknown> =>
@@ -209,6 +309,21 @@ const text = (
   res.end(payload);
 };
 
+const binary = (
+  res: ServerResponse,
+  status: number,
+  payload: Buffer,
+  contentType = "application/octet-stream",
+  extraHeaders?: Record<string, string>,
+): void => {
+  res.writeHead(status, {
+    "Content-Type": contentType,
+    "Content-Length": String(payload.byteLength),
+    ...(extraHeaders ?? {}),
+  });
+  res.end(payload);
+};
+
 const contentTypeForPath = (filePath: string): string => {
   if (filePath.endsWith(".html")) return "text/html";
   if (filePath.endsWith(".js") || filePath.endsWith(".mjs") || filePath.endsWith(".ts") || filePath.endsWith(".tsx")) {
@@ -219,7 +334,110 @@ const contentTypeForPath = (filePath: string): string => {
   if (filePath.endsWith(".json")) return "application/json";
   if (filePath.endsWith(".png")) return "image/png";
   if (filePath.endsWith(".jpg") || filePath.endsWith(".jpeg")) return "image/jpeg";
+  if (filePath.endsWith(".mp4")) return "video/mp4";
+  if (filePath.endsWith(".webm")) return "video/webm";
+  if (filePath.endsWith(".zip")) return "application/zip";
   return "application/octet-stream";
+};
+
+const findNewestFileByName = (rootDir: string, fileName: string): string | null => {
+  if (!fs.existsSync(rootDir)) {
+    return null;
+  }
+  const stack = [rootDir];
+  let newest: { path: string; mtimeMs: number } | null = null;
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    const entries = fs.readdirSync(current, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(fullPath);
+        continue;
+      }
+      if (!entry.isFile() || entry.name !== fileName) {
+        continue;
+      }
+      const stats = fs.statSync(fullPath);
+      if (stats.size <= 0) {
+        continue;
+      }
+      if (!newest || stats.mtimeMs > newest.mtimeMs) {
+        newest = { path: fullPath, mtimeMs: stats.mtimeMs };
+      }
+    }
+  }
+  return newest?.path ?? null;
+};
+
+const pickLargestExistingFile = (paths: string[]): string | null => {
+  let winner: { path: string; size: number } | null = null;
+  for (const candidate of paths) {
+    if (!candidate || !fs.existsSync(candidate)) {
+      continue;
+    }
+    const stats = fs.statSync(candidate);
+    if (!stats.isFile() || stats.size <= 0) {
+      continue;
+    }
+    if (!winner || stats.size > winner.size) {
+      winner = { path: candidate, size: stats.size };
+    }
+  }
+  return winner?.path ?? null;
+};
+
+const transcodeWebmToMp4 = async (inputPath: string, outputPath: string, ffmpegBin: string): Promise<void> => {
+  await new Promise<void>((resolve, reject) => {
+    const proc = spawn(
+      ffmpegBin,
+      [
+        "-y",
+        "-i",
+        inputPath,
+        "-movflags",
+        "+faststart",
+        "-pix_fmt",
+        "yuv420p",
+        "-vf",
+        "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+        outputPath,
+      ],
+      { stdio: "ignore" },
+    );
+    proc.on("error", reject);
+    proc.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(new Error(`ffmpeg exited with code ${code ?? "unknown"}`));
+    });
+  });
+};
+
+const resolveArtifactPathsFromOutput = (
+  execution: QaAiExecutionJob,
+  resolvedProjectDir: string,
+): { videoPath: string | null; tracePath: string | null } => {
+  const videoCandidates: string[] = [];
+  const traceCandidates: string[] = [];
+  for (const line of execution.outputLines ?? []) {
+    const normalized = stripAnsi(line).trim();
+    const videoMatch = normalized.match(/test-results\/.+\/video\.webm$/);
+    if (videoMatch) {
+      videoCandidates.push(path.resolve(resolvedProjectDir, videoMatch[0]));
+    }
+    const traceMatch = normalized.match(/test-results\/.+\/trace\.zip$/);
+    if (traceMatch) {
+      traceCandidates.push(path.resolve(resolvedProjectDir, traceMatch[0]));
+    }
+  }
+  const testResultsDir = path.join(resolvedProjectDir, "test-results");
+  return {
+    videoPath: pickLargestExistingFile(videoCandidates) ?? findNewestFileByName(testResultsDir, "video.webm"),
+    tracePath: pickLargestExistingFile(traceCandidates) ?? findNewestFileByName(testResultsDir, "trace.zip"),
+  };
 };
 
 const serveStatic = (res: ServerResponse, filePath: string): void => {
@@ -230,6 +448,49 @@ const serveStatic = (res: ServerResponse, filePath: string): void => {
   const content = fs.readFileSync(filePath);
   res.writeHead(200, { "Content-Type": contentTypeForPath(filePath) });
   res.end(content);
+};
+
+const serveStaticBinaryFile = (
+  req: IncomingMessage,
+  res: ServerResponse,
+  filePath: string,
+  contentType: string,
+  extraHeaders?: Record<string, string>,
+): void => {
+  const stats = fs.statSync(filePath);
+  const total = stats.size;
+  const range = req.headers.range;
+  if (!range) {
+    res.writeHead(200, {
+      "Content-Type": contentType,
+      "Content-Length": String(total),
+      "Accept-Ranges": "bytes",
+      ...(extraHeaders ?? {}),
+    });
+    fs.createReadStream(filePath).pipe(res);
+    return;
+  }
+  const match = range.match(/bytes=(\d*)-(\d*)/);
+  if (!match) {
+    res.writeHead(416, { "Content-Range": `bytes */${total}`, ...(extraHeaders ?? {}) });
+    res.end();
+    return;
+  }
+  const start = match[1] ? Number(match[1]) : 0;
+  const end = match[2] ? Number(match[2]) : total - 1;
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start < 0 || end >= total) {
+    res.writeHead(416, { "Content-Range": `bytes */${total}`, ...(extraHeaders ?? {}) });
+    res.end();
+    return;
+  }
+  res.writeHead(206, {
+    "Content-Type": contentType,
+    "Content-Length": String(end - start + 1),
+    "Content-Range": `bytes ${start}-${end}/${total}`,
+    "Accept-Ranges": "bytes",
+    ...(extraHeaders ?? {}),
+  });
+  fs.createReadStream(filePath, { start, end }).pipe(res);
 };
 
 const isPathAllowed = (filePath: string, allowList: string[]): boolean => {
@@ -443,6 +704,11 @@ const ensureQaTables = (db: DatabaseSync) => {
       id TEXT PRIMARY KEY,
       run_id TEXT NOT NULL,
       status TEXT NOT NULL,
+      execution_mode TEXT NOT NULL DEFAULT 'shell',
+      mcp_transport TEXT,
+      mcp_endpoint TEXT,
+      mcp_session_id TEXT,
+      mcp_action_count INTEGER NOT NULL DEFAULT 0,
       current_case_id TEXT,
       current_step_id TEXT,
       current_step_index INTEGER NOT NULL,
@@ -461,6 +727,31 @@ const ensureQaTables = (db: DatabaseSync) => {
   );
   try {
     db.exec("ALTER TABLE qa_manual_ai_executions ADD COLUMN playwright_ui_url TEXT;");
+  } catch {
+    // no-op: already migrated
+  }
+  try {
+    db.exec("ALTER TABLE qa_manual_ai_executions ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'shell';");
+  } catch {
+    // no-op: already migrated
+  }
+  try {
+    db.exec("ALTER TABLE qa_manual_ai_executions ADD COLUMN mcp_transport TEXT;");
+  } catch {
+    // no-op: already migrated
+  }
+  try {
+    db.exec("ALTER TABLE qa_manual_ai_executions ADD COLUMN mcp_endpoint TEXT;");
+  } catch {
+    // no-op: already migrated
+  }
+  try {
+    db.exec("ALTER TABLE qa_manual_ai_executions ADD COLUMN mcp_session_id TEXT;");
+  } catch {
+    // no-op: already migrated
+  }
+  try {
+    db.exec("ALTER TABLE qa_manual_ai_executions ADD COLUMN mcp_action_count INTEGER NOT NULL DEFAULT 0;");
   } catch {
     // no-op: already migrated
   }
@@ -494,6 +785,11 @@ const toManualAiExecution = (row: any): QaManualAiExecutionJob => {
     id: String(row.id),
     runId: String(row.run_id),
     status: row.status as QaManualAiExecutionJob["status"],
+    executionMode: (row.execution_mode ?? "shell") as QaManualAiExecutionJob["executionMode"],
+    mcpTransport: (row.mcp_transport ?? null) as QaManualAiExecutionJob["mcpTransport"],
+    mcpEndpoint: row.mcp_endpoint ?? null,
+    mcpSessionId: row.mcp_session_id ?? null,
+    mcpActionCount: Number(row.mcp_action_count ?? 0),
     currentCaseId: row.current_case_id ?? null,
     currentStepId: row.current_step_id ?? null,
     currentStepIndex: Number(row.current_step_index ?? 0),
@@ -515,16 +811,143 @@ export function startDaemonServer(config: ServerConfig): http.Server {
   const daemon = new QaRunnerDaemon(config.daemonConfig);
   const state: ServerState = {};
   const generationJobs = new Map<string, QaGenerationJob>();
+  const automationExecutionJobs = new Map<string, QaAutomationExecutionJob>();
   const aiExecutionJobs = new Map<string, QaAiExecutionJob>();
   const aiExecutionProcesses = new Map<string, ReturnType<typeof spawn>>();
-  const executionModeEnvRaw = (process.env.QA_RUNNER_PLAYWRIGHT_EXECUTION_MODE ?? "stub").trim().toLowerCase();
-  const defaultExecutionMode: "stub" | "shell" | "ui" =
+  const videoTranscodePromises = new Map<string, Promise<void>>();
+  const executionModeEnvRaw = (process.env.QA_RUNNER_PLAYWRIGHT_EXECUTION_MODE ?? "mcp").trim().toLowerCase();
+  const defaultExecutionMode: "stub" | "shell" | "ui" | "mcp" =
+    executionModeEnvRaw === "shell" || executionModeEnvRaw === "ui" || executionModeEnvRaw === "mcp"
+      ? executionModeEnvRaw
+      : "stub";
+  const defaultAiExecutionMode: "stub" | "shell" | "ui" =
     executionModeEnvRaw === "shell" || executionModeEnvRaw === "ui" ? executionModeEnvRaw : "stub";
   const playwrightProjectDir = process.env.QA_RUNNER_PLAYWRIGHT_PROJECT_DIR?.trim() || "e2e/ui";
   const playwrightUiPort = Number(process.env.QA_RUNNER_PLAYWRIGHT_UI_PORT ?? "9323");
   const playwrightUiHost = process.env.QA_RUNNER_PLAYWRIGHT_UI_HOST?.trim() || "127.0.0.1";
+  const mcpTransportRaw = (process.env.QA_RUNNER_PLAYWRIGHT_MCP_TRANSPORT ?? "http").trim().toLowerCase();
+  const mcpTransport: McpTransportMode = mcpTransportRaw === "stdio" ? "stdio" : "http";
+  const mcpUrl = process.env.QA_RUNNER_PLAYWRIGHT_MCP_URL?.trim() || "http://localhost:8931/mcp";
+  const mcpCommand = process.env.QA_RUNNER_PLAYWRIGHT_MCP_COMMAND?.trim() || "npx";
+  const mcpDefaultVersionPin = "0.0.70";
+  const mcpArgs = (
+    process.env.QA_RUNNER_PLAYWRIGHT_MCP_ARGS?.trim() || `-y @playwright/mcp@${mcpDefaultVersionPin} --browser chromium`
+  )
+    .split(/\s+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const mcpTimeoutMsRaw = Number(process.env.QA_RUNNER_PLAYWRIGHT_MCP_TIMEOUT_MS ?? "30000");
+  const mcpTimeoutMs = Number.isFinite(mcpTimeoutMsRaw) && mcpTimeoutMsRaw > 1000 ? mcpTimeoutMsRaw : 30000;
+  const mcpHealth: QaMcpHealthState = {
+    enabled: defaultExecutionMode === "mcp",
+    transport: mcpTransport,
+    endpoint: mcpUrl,
+    timeoutMs: mcpTimeoutMs,
+    defaultVersionPin: mcpDefaultVersionPin,
+    lastStatus: "idle",
+    lastCheckAt: null,
+    lastError: null,
+    lastSessionId: null,
+    lastActionCount: 0,
+    lastExecutionJobId: null,
+  };
   const needsXvfb = process.platform === "linux" && !process.env.DISPLAY;
   const xvfbAvailable = needsXvfb && spawnSync("which", ["xvfb-run"], { stdio: "ignore" }).status === 0;
+  const mcpVisibleBrowserDiagnostics = (() => {
+    if (process.platform === "linux") {
+      const display = process.env.DISPLAY?.trim() ?? "";
+      if (!display) {
+        return {
+          expected: false,
+          reason: "DISPLAY is not set in this shell; MCP browser runs headless in Linux sessions without display access.",
+        };
+      }
+      return {
+        expected: true,
+        reason: `DISPLAY=${display} detected; headed MCP browser should be visible in this desktop session.`,
+      };
+    }
+    if (process.platform === "darwin") {
+      return {
+        expected: true,
+        reason: "macOS GUI sessions can show headed browser windows even when DISPLAY is empty.",
+      };
+    }
+    if (process.platform === "win32") {
+      return {
+        expected: true,
+        reason: "Windows GUI session detected; headed MCP browser should be visible.",
+      };
+    }
+    return {
+      expected: false,
+      reason: `Platform ${process.platform} has no explicit visibility heuristic; browser may run headless.`,
+    };
+  })();
+  const ffmpegBin = process.env.QA_RUNNER_FFMPEG_BIN?.trim() || "ffmpeg";
+  const ffmpegAvailable = spawnSync(ffmpegBin, ["-version"], { stdio: "ignore" }).status === 0;
+  const configuredAiProvider = (process.env.QA_RUNNER_AI_PROVIDER?.trim().toLowerCase() || "agent") as
+    | "agent"
+    | "local"
+    | "remote";
+  const aiProviderFallbackChain = (process.env.QA_RUNNER_AI_FALLBACK_CHAIN?.trim() || "agent,local,remote")
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter((value): value is "agent" | "local" | "remote" => value === "agent" || value === "local" || value === "remote");
+  const allowedAiProviders = new Set(
+    (process.env.QA_RUNNER_AI_ALLOWED_PROVIDERS?.trim() || "agent,local,remote")
+      .split(",")
+      .map((value) => value.trim().toLowerCase())
+      .filter((value): value is "agent" | "local" | "remote" => value === "agent" || value === "local" || value === "remote"),
+  );
+  const aiProviderCapabilities = [
+    {
+      id: "agent" as const,
+      label: "IDE Agent (Codex/Claude/CLI)",
+      enabled: allowedAiProviders.has("agent"),
+      supportsVision: true,
+      supportsCodeEdit: true,
+      supportsToolUse: true,
+      supportsLongContext: true,
+      bestFor: "Code-aware triage, patch proposals, refactors in active workspace",
+      notes: "Primary provider for dev workflow inside IDE/CLI.",
+    },
+    {
+      id: "local" as const,
+      label: "Local Model",
+      enabled: allowedAiProviders.has("local"),
+      supportsVision: false,
+      supportsCodeEdit: false,
+      supportsToolUse: false,
+      supportsLongContext: false,
+      bestFor: "Offline-safe text analysis and policy-restricted environments",
+      notes: "Capabilities depend on your local model/runtime.",
+    },
+    {
+      id: "remote" as const,
+      label: "Remote Provider API",
+      enabled: allowedAiProviders.has("remote"),
+      supportsVision: true,
+      supportsCodeEdit: false,
+      supportsToolUse: true,
+      supportsLongContext: true,
+      bestFor: "Heavy multimodal reasoning or fallback when agent/local are unavailable",
+      notes: "Optional; can be disabled by policy.",
+    },
+  ];
+  const resolveEffectiveAiProvider = (): "agent" | "local" | "remote" => {
+    const preferred = aiProviderCapabilities.find((provider) => provider.id === configuredAiProvider && provider.enabled);
+    if (preferred) {
+      return preferred.id;
+    }
+    for (const candidate of aiProviderFallbackChain) {
+      const provider = aiProviderCapabilities.find((item) => item.id === candidate && item.enabled);
+      if (provider) {
+        return provider.id;
+      }
+    }
+    return "agent";
+  };
   const workspaceDbs = new Map<string, DatabaseSync>();
   const uiDir = getUiAssetDir();
   const uiIndex = path.join(uiDir, "index.html");
@@ -784,11 +1207,17 @@ export function startDaemonServer(config: ServerConfig): http.Server {
   const upsertManualAiExecution = (db: DatabaseSync, execution: QaManualAiExecutionJob): void => {
     db.prepare(
       `INSERT INTO qa_manual_ai_executions (
-        id, run_id, status, current_case_id, current_step_id, current_step_index, total_steps,
+        id, run_id, status, execution_mode, mcp_transport, mcp_endpoint, mcp_session_id, mcp_action_count,
+        current_case_id, current_step_id, current_step_index, total_steps,
         failure_reason, report_ref, trace_ref, video_ref, playwright_ui_url, started_at, completed_at, created_at, updated_at, action_log
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         status=excluded.status,
+        execution_mode=excluded.execution_mode,
+        mcp_transport=excluded.mcp_transport,
+        mcp_endpoint=excluded.mcp_endpoint,
+        mcp_session_id=excluded.mcp_session_id,
+        mcp_action_count=excluded.mcp_action_count,
         current_case_id=excluded.current_case_id,
         current_step_id=excluded.current_step_id,
         current_step_index=excluded.current_step_index,
@@ -806,6 +1235,11 @@ export function startDaemonServer(config: ServerConfig): http.Server {
       execution.id,
       execution.runId,
       execution.status,
+      execution.executionMode,
+      execution.mcpTransport ?? null,
+      execution.mcpEndpoint ?? null,
+      execution.mcpSessionId ?? null,
+      execution.mcpActionCount ?? 0,
       execution.currentCaseId,
       execution.currentStepId,
       execution.currentStepIndex,
@@ -845,12 +1279,14 @@ export function startDaemonServer(config: ServerConfig): http.Server {
 
   type ManualAiParsedStep =
     | { kind: "open"; target: string }
+    | { kind: "select_suite" }
     | { kind: "fill"; field: string; valueRef: string }
     | { kind: "click"; label: string }
     | { kind: "verify_text"; text: string }
     | { kind: "verify_url_contains"; value: string }
     | { kind: "verify_no_js_errors" }
-    | { kind: "verify_no_failed_network_requests" };
+    | { kind: "verify_no_failed_network_requests" }
+    | { kind: "manual_note"; text: string };
 
   type ManualAiStepParseResult =
     | { supported: true; step: ManualAiParsedStep }
@@ -858,12 +1294,20 @@ export function startDaemonServer(config: ServerConfig): http.Server {
 
   const parseManualAiStep = (stepText: string): ManualAiStepParseResult => {
     const text = stepText.trim();
+    const strictParsing = /^1|true|yes$/i.test(process.env.QA_RUNNER_MANUAL_AI_STRICT_PARSING?.trim() ?? "");
     if (!text) {
       return { supported: false, reason: "manual_required: empty step text" };
     }
     let match = text.match(/^open\s+(.+)$/i);
     if (match) {
       return { supported: true, step: { kind: "open", target: match[1].trim() } };
+    }
+    match = text.match(/^navigate\s+to\s+(.+)$/i);
+    if (match) {
+      return { supported: true, step: { kind: "open", target: match[1].trim() } };
+    }
+    if (/^select\s+suite$/i.test(text)) {
+      return { supported: true, step: { kind: "select_suite" } };
     }
     match = text.match(/^fill\s+(.+):\s*(.+)$/i);
     if (match) {
@@ -894,6 +1338,10 @@ export function startDaemonServer(config: ServerConfig): http.Server {
     if (match) {
       return { supported: true, step: { kind: "verify_text", text: match[1].trim() } };
     }
+    if (!strictParsing) {
+      // Allow high-level manual checklist wording to continue in watch mode without hard-failing.
+      return { supported: true, step: { kind: "manual_note", text } };
+    }
     return { supported: false, reason: "manual_required: unsupported step pattern" };
   };
 
@@ -903,6 +1351,40 @@ export function startDaemonServer(config: ServerConfig): http.Server {
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-+|-+$/g, "");
+
+  const expandManualAiAliasTokens = (value: string): string[] => {
+    const base = value
+      .split(/\r?\n/)[0]
+      ?.replace(/\s+/g, " ")
+      .trim()
+      .replace(/[.,;:!?]+$/g, "") ?? "";
+    if (!base) return [];
+    const lowered = base.toLowerCase();
+    const aliases: string[] = [base];
+    if (lowered === "ai testing" || lowered.includes("ai testing")) {
+      aliases.push("AI Mode", "AI AI Testing", "AI");
+    } else if (lowered === "manual testing" || lowered.includes("manual testing")) {
+      aliases.push("Manual Mode", "M Manual Testing", "Manual");
+    } else if (
+      lowered === "team & collaboration" ||
+      lowered === "team collaboration" ||
+      lowered.includes("team & collaboration") ||
+      lowered.includes("team collaboration")
+    ) {
+      aliases.push("Team Hub", "T Team & Collaboration", "Team");
+    } else if (lowered === "settings" || lowered.includes("settings")) {
+      aliases.push("S Settings");
+    } else if (lowered === "start run" || lowered.includes("start run")) {
+      aliases.push("Run now", "Start");
+    }
+    const seen = new Set<string>();
+    return aliases.filter((item) => {
+      const key = item.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  };
 
   const resolveManualAiFillValue = (valueRef: string): { ok: true; value: string } | { ok: false; reason: string } => {
     const token = valueRef.trim();
@@ -921,6 +1403,57 @@ export function startDaemonServer(config: ServerConfig): http.Server {
     process.env.PLAYWRIGHT_BASE_URL?.trim() ||
     process.env.BASE_URL?.trim() ||
     "http://127.0.0.1:3000";
+
+  const normalizeOpenTarget = (value: string): string =>
+    value
+      .trim()
+      .replace(/^["'`]+|["'`]+$/g, "")
+      .replace(/[.,;:!?]+$/g, "")
+      .trim();
+
+  const resolveManualAiOpenUrl = (
+    rawTarget: string,
+  ): { ok: true; url: string } | { ok: false; reason: string } => {
+    const target = normalizeOpenTarget(rawTarget);
+    if (!target) {
+      return { ok: false, reason: "manual_required: open target empty" };
+    }
+    if (/^https?:\/\//i.test(target)) {
+      return { ok: true, url: target };
+    }
+
+    const baseUrl = resolveManualAiBaseUrl().replace(/\/$/, "");
+    const lowered = target.toLowerCase().replace(/\s+/g, " ");
+
+    // Explicit reusable app-root semantics.
+    if (
+      lowered === "base url" ||
+      lowered === "baseurl" ||
+      lowered === "the base url" ||
+      lowered.includes("qa runner ui") ||
+      lowered.includes("the ui") ||
+      lowered === "app root" ||
+      lowered === "home" ||
+      lowered === "homepage" ||
+      lowered === "root"
+    ) {
+      return { ok: true, url: baseUrl };
+    }
+
+    if (/^\/[^\s]*$/.test(target)) {
+      return { ok: true, url: `${baseUrl}${target}` };
+    }
+
+    // Allow simple path segments like "login" but reject free-form prose.
+    if (!/\s/.test(target)) {
+      return { ok: true, url: `${baseUrl}/${target.replace(/^\//, "")}` };
+    }
+
+    return {
+      ok: false,
+      reason: `manual_required: ambiguous open target "${rawTarget}" (use absolute URL, /path, or "Open base URL")`,
+    };
+  };
 
   const executeManualAiStep = async (input: {
     step: ManualAiParsedStep;
@@ -954,11 +1487,30 @@ export function startDaemonServer(config: ServerConfig): http.Server {
 
     switch (input.step.kind) {
       case "open": {
-        const target = input.step.target;
-        const isAbsolute = /^https?:\/\//i.test(target);
-        const baseUrl = resolveManualAiBaseUrl();
-        const url = isAbsolute ? target : `${baseUrl.replace(/\/$/, "")}/${target.replace(/^\//, "")}`;
+        const resolved = resolveManualAiOpenUrl(input.step.target);
+        if (!resolved.ok) {
+          throw new Error(resolved.reason);
+        }
+        const url = resolved.url;
         await input.page.goto(url, { waitUntil: "domcontentloaded", timeout: stepTimeoutMs });
+        return;
+      }
+      case "select_suite": {
+        const select = input.page.locator('select:not([disabled])').first();
+        await select.waitFor({ state: "visible", timeout: textWaitMs });
+        const options = await select.locator("option").all();
+        let selected = false;
+        for (let index = 0; index < options.length; index += 1) {
+          const optionValue = (await options[index]!.getAttribute("value")) ?? "";
+          if (optionValue.trim()) {
+            await select.selectOption({ index });
+            selected = true;
+            break;
+          }
+        }
+        if (!selected) {
+          throw new Error("select_suite_failed: no non-empty suite option available");
+        }
         return;
       }
       case "fill": {
@@ -985,26 +1537,37 @@ export function startDaemonServer(config: ServerConfig): http.Server {
       }
       case "click": {
         const label = input.step.label;
-        const labelToken = slugifySelectorToken(label);
-        const candidates = [
-          input.page.getByRole("button", { name: label, exact: false }).first(),
-          input.page.getByRole("link", { name: label, exact: false }).first(),
-          input.page.getByTestId(labelToken).first(),
-          input.page.getByText(label, { exact: false }).first(),
-        ];
-        for (const candidate of candidates) {
-          if (await waitAndClick(candidate)) {
-            return;
+        const labels = expandManualAiAliasTokens(label);
+        for (const candidateLabel of labels) {
+          const labelToken = slugifySelectorToken(candidateLabel);
+          const candidates = [
+            input.page.getByRole("button", { name: candidateLabel, exact: false }).first(),
+            input.page.getByRole("link", { name: candidateLabel, exact: false }).first(),
+            input.page.getByTestId(labelToken).first(),
+            input.page.getByText(candidateLabel, { exact: false }).first(),
+          ];
+          for (const candidate of candidates) {
+            if (await waitAndClick(candidate)) {
+              return;
+            }
           }
         }
         throw new Error(`click_target_not_found: ${label}`);
       }
       case "verify_text": {
-        await input.page.getByText(input.step.text, { exact: false }).first().waitFor({
-          state: "visible",
-          timeout: textWaitMs,
-        });
-        return;
+        const labels = expandManualAiAliasTokens(input.step.text);
+        for (const candidateLabel of labels) {
+          try {
+            await input.page.getByText(candidateLabel, { exact: false }).first().waitFor({
+              state: "visible",
+              timeout: textWaitMs,
+            });
+            return;
+          } catch {
+            // try next alias
+          }
+        }
+        throw new Error(`text_not_visible: ${input.step.text}`);
       }
       case "verify_url_contains": {
         const currentUrl = String(input.page.url() ?? "");
@@ -1025,6 +1588,308 @@ export function startDaemonServer(config: ServerConfig): http.Server {
         }
         return;
       }
+      case "manual_note": {
+        return;
+      }
+    }
+  };
+
+  const parseSnapshotRefs = (
+    snapshot: string,
+  ): Array<{ ref: string; roleHint: string; text: string; lower: string }> => {
+    const entries: Array<{ ref: string; roleHint: string; text: string; lower: string }> = [];
+    for (const line of snapshot.split(/\r?\n/)) {
+      const refMatch = line.match(/\[ref=([^\]]+)\]/i);
+      if (!refMatch?.[1]) {
+        continue;
+      }
+      const ref = refMatch[1].trim();
+      const roleHintMatch = line.match(/-\s*([a-zA-Z0-9_-]+)/);
+      const roleHint = (roleHintMatch?.[1] ?? "").toLowerCase();
+      const text = line.replace(/\s*\[ref=[^\]]+\]\s*/gi, " ").trim();
+      entries.push({
+        ref,
+        roleHint,
+        text,
+        lower: text.toLowerCase(),
+      });
+    }
+    return entries;
+  };
+
+  const findRefFromSnapshot = (snapshot: string, tokens: string[], preferredRoles: string[]): string | null => {
+    const parsed = parseSnapshotRefs(snapshot);
+    const normalizedTokens = tokens.map((token) => token.trim().toLowerCase()).filter(Boolean);
+    if (normalizedTokens.length === 0) {
+      return null;
+    }
+    const matchesToken = (haystack: string, token: string): boolean => {
+      if (haystack.includes(token)) {
+        return true;
+      }
+      const words = token.split(/\s+/).map((part) => part.trim()).filter(Boolean);
+      if (words.length < 2) {
+        return false;
+      }
+      return words.every((word) => haystack.includes(word));
+    };
+
+    const findMatch = (requireRole: boolean): string | null => {
+      for (const token of normalizedTokens) {
+        for (const entry of parsed) {
+          if (requireRole && !preferredRoles.some((role) => entry.roleHint.includes(role))) {
+            continue;
+          }
+          if (matchesToken(entry.lower, token)) {
+            return entry.ref;
+          }
+        }
+      }
+      return null;
+    };
+
+    return findMatch(true) ?? findMatch(false);
+  };
+
+  const parseLikelyUrlFromToolResult = (raw: string): string => {
+    const match = raw.match(/https?:\/\/[^\s"')]+/i);
+    if (match?.[0]) {
+      return match[0];
+    }
+    return raw.trim();
+  };
+
+  const collectClickableHintsFromSnapshot = (snapshot: string, limit = 8): string[] => {
+    const entries = parseSnapshotRefs(snapshot).filter((entry) =>
+      entry.roleHint.includes("button") || entry.roleHint.includes("link"),
+    );
+    const labels: string[] = [];
+    const seen = new Set<string>();
+    for (const entry of entries) {
+      const cleaned = entry.text
+        .replace(/^[-*]\s*/, "")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (!cleaned) {
+        continue;
+      }
+      const key = cleaned.toLowerCase();
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      labels.push(cleaned);
+      if (labels.length >= limit) {
+        break;
+      }
+    }
+    return labels;
+  };
+
+  const executeManualAiStepWithMcp = async (input: {
+    step: ManualAiParsedStep;
+    callTool: (name: string, args: Record<string, unknown>) => Promise<string>;
+  }): Promise<void> => {
+    const waitTimeoutMs = Number(process.env.QA_RUNNER_MANUAL_AI_STEP_TIMEOUT_MS ?? "8000");
+    const isSnapshotRefStaleError = (error: unknown): boolean => {
+      const message = error instanceof Error ? error.message : String(error);
+      const normalized = message.toLowerCase();
+      return normalized.includes("ref") && normalized.includes("not found in the current page snapshot");
+    };
+    const resolveRefFromSnapshot = async (
+      tokens: string[],
+      preferredRoles: string[],
+    ): Promise<string | null> => {
+      const snapshot = await input.callTool("browser_snapshot", {});
+      return findRefFromSnapshot(snapshot, tokens, preferredRoles) ?? findRefFromSnapshot(snapshot, tokens, []);
+    };
+    const waitForRefFromSnapshot = async (
+      tokens: string[],
+      preferredRoles: string[],
+      timeoutMs: number,
+    ): Promise<string | null> => {
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < timeoutMs) {
+        const ref = await resolveRefFromSnapshot(tokens, preferredRoles);
+        if (ref) {
+          return ref;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      return null;
+    };
+    const tryOpenNavigationMenu = async (): Promise<void> => {
+      const menuRef = await resolveRefFromSnapshot(
+        ["Open navigation menu", "navigation menu", "menu"],
+        ["button"],
+      );
+      if (!menuRef) {
+        return;
+      }
+      try {
+        await input.callTool("browser_click", { ref: menuRef });
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      } catch {
+        // Best-effort fallback only.
+      }
+    };
+
+    switch (input.step.kind) {
+      case "open": {
+        const resolved = resolveManualAiOpenUrl(input.step.target);
+        if (!resolved.ok) {
+          throw new Error(resolved.reason);
+        }
+        const url = resolved.url;
+        await input.callTool("browser_navigate", { url });
+        return;
+      }
+      case "select_suite": {
+        const raw = await input.callTool("browser_evaluate", {
+          function: `() => {
+            const selects = Array.from(document.querySelectorAll('select')).filter((node) => !node.disabled);
+            const target = selects.find((node) => Array.from(node.options).some((option) => option.value.trim() !== "")) || null;
+            if (!target) return "select_suite_failed: no selectable suite dropdown";
+            const next = Array.from(target.options).find((option) => option.value.trim() !== "");
+            if (!next) return "select_suite_failed: no non-empty suite option available";
+            target.value = next.value;
+            target.dispatchEvent(new Event("input", { bubbles: true }));
+            target.dispatchEvent(new Event("change", { bubbles: true }));
+            return "suite_selected";
+          }`,
+        });
+        if (!/suite_selected/i.test(raw)) {
+          throw new Error(raw.trim() || "select_suite_failed");
+        }
+        return;
+      }
+      case "fill": {
+        const resolved = resolveManualAiFillValue(input.step.valueRef);
+        if (!resolved.ok) {
+          throw new Error(resolved.reason);
+        }
+        const field = input.step.field;
+        const fieldToken = slugifySelectorToken(field);
+        const tokens = [field, fieldToken];
+        let lastError: string | null = null;
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const ref = await resolveRefFromSnapshot(tokens, ["textbox", "input", "combobox", "searchbox"]);
+          if (!ref) {
+            throw new Error(`fill_target_not_found: ${field}`);
+          }
+          try {
+            await input.callTool("browser_type", {
+              ref,
+              text: resolved.value,
+              slowly: false,
+            });
+            lastError = null;
+            break;
+          } catch (error) {
+            if (!isSnapshotRefStaleError(error) || attempt === 2) {
+              throw error;
+            }
+            lastError = error instanceof Error ? error.message : String(error);
+            await new Promise((resolve) => setTimeout(resolve, 200));
+          }
+        }
+        if (lastError) {
+          throw new Error(lastError);
+        }
+        return;
+      }
+      case "click": {
+        const label = input.step.label;
+        const tokens = expandManualAiAliasTokens(label).flatMap((item) => [item, slugifySelectorToken(item)]);
+        let lastError: string | null = null;
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const ref = await waitForRefFromSnapshot(tokens, ["button", "link"], waitTimeoutMs);
+          if (!ref) {
+            if (attempt < 2) {
+              await tryOpenNavigationMenu();
+              continue;
+            }
+            const snapshot = await input.callTool("browser_snapshot", {});
+            const hints = collectClickableHintsFromSnapshot(snapshot).join(" | ");
+            throw new Error(
+              hints
+                ? `click_target_not_found: ${label} (visible_clickables: ${hints})`
+                : `click_target_not_found: ${label}`,
+            );
+          }
+          try {
+            await input.callTool("browser_click", { ref });
+            lastError = null;
+            break;
+          } catch (error) {
+            if (!isSnapshotRefStaleError(error) || attempt === 2) {
+              throw error;
+            }
+            lastError = error instanceof Error ? error.message : String(error);
+            await new Promise((resolve) => setTimeout(resolve, 200));
+          }
+        }
+        if (lastError) {
+          throw new Error(lastError);
+        }
+        return;
+      }
+      case "verify_text": {
+        const targets = expandManualAiAliasTokens(input.step.text).map((item) => item.toLowerCase());
+        const startedAt = Date.now();
+        while (Date.now() - startedAt < waitTimeoutMs) {
+          const snapshot = await input.callTool("browser_snapshot", {});
+          const snapshotLower = snapshot.toLowerCase();
+          if (targets.some((target) => snapshotLower.includes(target))) {
+            return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 300));
+        }
+        throw new Error(`text_not_visible: ${input.step.text}`);
+      }
+      case "verify_url_contains": {
+        const value = input.step.value;
+        const raw = await input.callTool("browser_evaluate", {
+          function: "() => window.location.href",
+        });
+        const currentUrl = parseLikelyUrlFromToolResult(raw);
+        if (!currentUrl.includes(value)) {
+          throw new Error(`url_mismatch: expected "${value}" in "${currentUrl}"`);
+        }
+        return;
+      }
+      case "verify_no_js_errors": {
+        const raw = await input.callTool("browser_console_messages", {
+          level: "error",
+          all: true,
+        });
+        const normalized = raw.trim();
+        if (normalized && !/^no console messages/i.test(normalized)) {
+          const first = normalized.split(/\r?\n/).find((line) => line.trim()) ?? normalized;
+          throw new Error(`javascript_errors_detected: ${first}`);
+        }
+        return;
+      }
+      case "verify_no_failed_network_requests": {
+        const raw = await input.callTool("browser_network_requests", {
+          static: false,
+          requestBody: false,
+          requestHeaders: false,
+        });
+        const normalized = raw.toLowerCase();
+        const hasFailureHint =
+          /\b(status|code)\s*[:=]?\s*(4\d\d|5\d\d)\b/.test(normalized) ||
+          /\bfailed\b/.test(normalized) ||
+          /\berror\b/.test(normalized);
+        if (hasFailureHint) {
+          const first = raw.split(/\r?\n/).find((line) => line.trim()) ?? raw;
+          throw new Error(`failed_network_requests_detected: ${first.trim()}`);
+        }
+        return;
+      }
+      case "manual_note": {
+        return;
+      }
     }
   };
 
@@ -1034,7 +1899,7 @@ export function startDaemonServer(config: ServerConfig): http.Server {
     executionJobId: string;
     casesRoot: string;
     playwrightProjectDir: string;
-    executionMode: "stub" | "shell" | "ui";
+    executionMode: "stub" | "shell" | "ui" | "mcp";
   }): Promise<void> => {
     const detail = loadRunDetail(input.db, input.runId, input.casesRoot);
     if (!detail) {
@@ -1049,12 +1914,145 @@ export function startDaemonServer(config: ServerConfig): http.Server {
     execution = {
       ...execution,
       status: "running",
+      executionMode: input.executionMode,
+      mcpTransport: input.executionMode === "mcp" ? mcpTransport : null,
+      mcpEndpoint: input.executionMode === "mcp" ? mcpUrl : null,
+      mcpSessionId: null,
+      mcpActionCount: 0,
       startedAt,
       updatedAt: startedAt,
       totalSteps,
       currentStepIndex: 0,
     };
     upsertManualAiExecution(input.db, execution);
+
+    if (input.executionMode === "mcp") {
+      let client: PlaywrightMcpClient | null = null;
+      let stepIndex = 0;
+      try {
+        mcpHealth.lastStatus = "idle";
+        mcpHealth.lastCheckAt = new Date().toISOString();
+        mcpHealth.lastError = null;
+        mcpHealth.lastExecutionJobId = input.executionJobId;
+        mcpHealth.lastActionCount = 0;
+        client = await PlaywrightMcpClient.connect({
+          transport: mcpTransport,
+          url: mcpUrl,
+          command: mcpCommand,
+          args: mcpArgs,
+          timeoutMs: mcpTimeoutMs,
+        });
+        execution.mcpSessionId = client.getSessionId();
+        execution.mcpEndpoint = client.getEndpoint();
+        execution.updatedAt = new Date().toISOString();
+        upsertManualAiExecution(input.db, execution);
+        mcpHealth.lastStatus = "healthy";
+        mcpHealth.lastCheckAt = new Date().toISOString();
+        mcpHealth.lastSessionId = client.getSessionId();
+        mcpHealth.lastError = null;
+
+        for (const qaCase of detail.cases) {
+          for (const step of qaCase.steps) {
+            stepIndex += 1;
+            execution.currentCaseId = qaCase.id;
+            execution.currentStepId = step.id;
+            execution.currentStepIndex = stepIndex;
+            execution.updatedAt = new Date().toISOString();
+            upsertManualAiExecution(input.db, execution);
+
+            const parsed = parseManualAiStep(step.text);
+            let failureReason: string | null = null;
+            if (!parsed.supported) {
+              failureReason = parsed.reason;
+            } else {
+              try {
+                await executeManualAiStepWithMcp({
+                  step: parsed.step,
+                  callTool: async (name, args) => {
+                    if (!client) {
+                      throw new Error("mcp_client_not_ready");
+                    }
+                    const result = await client.callTool(name, args);
+                    execution.mcpActionCount = client.getActionCount();
+                    execution.updatedAt = new Date().toISOString();
+                    upsertManualAiExecution(input.db, execution);
+                    mcpHealth.lastActionCount = client.getActionCount();
+                    mcpHealth.lastCheckAt = new Date().toISOString();
+                    return result;
+                  },
+                });
+              } catch (error) {
+                failureReason = error instanceof Error ? error.message : "step_failed";
+              }
+            }
+
+            const now = new Date().toISOString();
+            const checkId = `check_${hashId(`${input.runId}:${step.id}`)}`;
+            input.db.prepare(
+              `INSERT INTO qa_step_checks (id, run_id, case_id, step_id, checked, auto_checked, failure_reason, updated_at)
+               VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET checked=excluded.checked, auto_checked=1, failure_reason=excluded.failure_reason, updated_at=excluded.updated_at`
+            ).run(checkId, input.runId, qaCase.id, step.id, failureReason ? 0 : 1, failureReason, now);
+
+            execution.actionLog.push({
+              at: now,
+              caseId: qaCase.id,
+              stepId: step.id,
+              stepText: step.text,
+              status: failureReason ? "failed" : "passed",
+              reason: failureReason ?? undefined,
+            });
+
+            if (failureReason) {
+              const resultId = `result_${hashId(`${input.runId}:${qaCase.id}`)}`;
+              input.db.prepare(
+                `INSERT INTO qa_case_results (id, run_id, case_id, status, notes, failure_reason, tested_by, completed_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
+                 ON CONFLICT(id) DO UPDATE SET status=excluded.status, notes=excluded.notes, failure_reason=excluded.failure_reason, completed_at=excluded.completed_at, updated_at=excluded.updated_at`
+              ).run(resultId, input.runId, qaCase.id, "failed", "", failureReason, now, now);
+
+              const runNow = new Date().toISOString();
+              execution.status = "failed";
+              execution.failureReason = failureReason;
+              execution.completedAt = runNow;
+              execution.updatedAt = runNow;
+              if (client) {
+                execution.mcpActionCount = client.getActionCount();
+              }
+              upsertManualAiExecution(input.db, execution);
+              input.db.prepare("UPDATE qa_runs SET status = ?, updated_at = ? WHERE id = ?").run("failed", runNow, input.runId);
+              return;
+            }
+          }
+        }
+
+        const now = new Date().toISOString();
+        execution.status = "completed";
+        execution.failureReason = null;
+        execution.completedAt = now;
+        execution.updatedAt = now;
+        execution.mcpActionCount = client.getActionCount();
+        upsertManualAiExecution(input.db, execution);
+        input.db.prepare("UPDATE qa_runs SET status = ?, updated_at = ? WHERE id = ?").run("passed", now, input.runId);
+      } catch (error) {
+        const now = new Date().toISOString();
+        execution.status = "failed";
+        execution.failureReason = error instanceof Error ? error.message : "mcp_execution_failed";
+        execution.completedAt = now;
+        execution.updatedAt = now;
+        if (client) {
+          execution.mcpActionCount = client.getActionCount();
+        }
+        upsertManualAiExecution(input.db, execution);
+        input.db.prepare("UPDATE qa_runs SET status = ?, updated_at = ? WHERE id = ?").run("failed", now, input.runId);
+        mcpHealth.lastStatus = "unhealthy";
+        mcpHealth.lastCheckAt = now;
+        mcpHealth.lastError = execution.failureReason;
+      } finally {
+        await client?.close().catch(() => undefined);
+      }
+      return;
+    }
 
     const resolvedProjectDir = path.resolve(process.cwd(), input.playwrightProjectDir);
     const projectPackageJson = path.join(resolvedProjectDir, "package.json");
@@ -1340,8 +2338,10 @@ export function startDaemonServer(config: ServerConfig): http.Server {
   const allowedOrigin = process.env.QA_RUNNER_CORS_ORIGIN ?? "http://localhost:5173";
   const corsHeaders = {
     "Access-Control-Allow-Origin": allowedOrigin,
+    "Access-Control-Allow-Credentials": "true",
     "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-QA-Workspace",
+    "Vary": "Origin",
   };
 
   const server = http.createServer(async (req, res) => {
@@ -1564,6 +2564,7 @@ export function startDaemonServer(config: ServerConfig): http.Server {
           casesRoot: casesDir,
           aiEnabled: true,
           playwrightUiEnabled: true,
+          videoTranscodeAvailable: ffmpegAvailable,
           executionMode: defaultExecutionMode,
           executionTimeoutMs: 120000,
           workspaceRoot: process.cwd(),
@@ -1575,6 +2576,56 @@ export function startDaemonServer(config: ServerConfig): http.Server {
           pomDirectLocatorThreshold: 8,
           manualReportWebhookEnabled: false,
           manualReportWebhookEventName: "qa.manual.report.ready",
+          mcp: {
+            enabled: defaultExecutionMode === "mcp",
+            transport: mcpTransport,
+            endpoint: mcpUrl,
+            timeoutMs: mcpTimeoutMs,
+            defaultVersionPin: mcpDefaultVersionPin,
+            visibleBrowserExpected: mcpVisibleBrowserDiagnostics.expected,
+            visibleBrowserReason: mcpVisibleBrowserDiagnostics.reason,
+          },
+          aiProvider: resolveEffectiveAiProvider(),
+          aiProviderFallbackChain,
+          aiProviderCapabilities,
+        },
+      });
+      return;
+    }
+
+    if (req.method === "GET" && req.url?.startsWith("/plugin/qa/mcp/health")) {
+      const requestUrl = new URL(req.url, "http://127.0.0.1");
+      const probe = requestUrl.searchParams.get("probe");
+      const shouldProbe = probe === "1" || probe === "true";
+      if (shouldProbe) {
+        let probeClient: PlaywrightMcpClient | null = null;
+        try {
+          probeClient = await PlaywrightMcpClient.connect({
+            transport: mcpTransport,
+            url: mcpUrl,
+            command: mcpCommand,
+            args: mcpArgs,
+            timeoutMs: mcpTimeoutMs,
+          });
+          mcpHealth.lastStatus = "healthy";
+          mcpHealth.lastCheckAt = new Date().toISOString();
+          mcpHealth.lastError = null;
+          mcpHealth.lastSessionId = probeClient.getSessionId();
+          mcpHealth.lastActionCount = probeClient.getActionCount();
+        } catch (error) {
+          mcpHealth.lastStatus = "unhealthy";
+          mcpHealth.lastCheckAt = new Date().toISOString();
+          mcpHealth.lastError = error instanceof Error ? error.message : String(error);
+        } finally {
+          await probeClient?.close().catch(() => undefined);
+        }
+      }
+
+      json(res, 200, {
+        data: {
+          ...mcpHealth,
+          command: mcpCommand,
+          args: mcpArgs,
         },
       });
       return;
@@ -2243,10 +3294,24 @@ export function startDaemonServer(config: ServerConfig): http.Server {
           tags?: string[];
           testDir?: string;
         }>(req)) ?? {};
-        const configuredDir = body.testDir?.trim() || path.join(process.cwd(), "e2e", "ui", "tests");
-        const absoluteTestDir = path.isAbsolute(configuredDir) ? configuredDir : path.join(process.cwd(), configuredDir);
-        if (!fs.existsSync(absoluteTestDir)) {
-          json(res, 404, { error: "qa_existing_tests_dir_not_found" }, corsHeaders);
+        const candidateDirs = [
+          body.testDir?.trim() || "",
+          path.join("e2e", "ui", "tests"),
+          path.join("e2e", "generated"),
+          path.join("e2e", "tests"),
+        ].filter(Boolean);
+        const absoluteCandidates = candidateDirs.map((dir) => (path.isAbsolute(dir) ? dir : path.join(process.cwd(), dir)));
+        const absoluteTestDir = absoluteCandidates.find((dir) => fs.existsSync(dir) && fs.statSync(dir).isDirectory());
+        if (!absoluteTestDir) {
+          json(
+            res,
+            404,
+            {
+              error: "qa_existing_tests_dir_not_found",
+              checkedDirs: absoluteCandidates.map((dir) => path.relative(process.cwd(), dir).replace(/\\/g, "/")),
+            },
+            corsHeaders,
+          );
           return;
         }
 
@@ -2406,7 +3471,7 @@ export function startDaemonServer(config: ServerConfig): http.Server {
 
     if (req.method === "POST" && req.url === "/plugin/qa/tests/suggest-fixes") {
       try {
-        const body = (await readRequestBody<{ generationJobId?: string; maxProposals?: number }>(req)) ?? {};
+        const body = (await readRequestBody<{ generationJobId?: string; maxProposals?: number; sourceExecutionJobId?: string }>(req)) ?? {};
         const generationJobId = body.generationJobId?.trim() ?? "";
         const job = generationJobs.get(generationJobId);
         if (!job) {
@@ -2419,9 +3484,23 @@ export function startDaemonServer(config: ServerConfig): http.Server {
         }
         const baseSuggestions = job.result.intelligentReview?.suggestions ?? [];
         const tests = job.result.tests ?? [];
-        const proposals = tests.slice(0, Math.max(1, body.maxProposals ?? 8)).map((test, index) => {
+        const effectiveProvider = resolveEffectiveAiProvider();
+        const supportsVision =
+          aiProviderCapabilities.find((provider) => provider.id === effectiveProvider)?.supportsVision ?? false;
+        const enabledSkillIds = listEnabledSelfHealSkillIds({ supportsVision });
+        let proposals: NonNullable<QaGenerationJob["result"]>["intelligentFixProposals"] = tests
+          .slice(0, Math.max(1, body.maxProposals ?? 8))
+          .flatMap((test, index) => {
           const suggestionId = baseSuggestions[index % (baseSuggestions.length || 1)]?.id ?? `qa_suggest_${index + 1}`;
-          return {
+          const absolutePath = path.resolve(process.cwd(), test.filePath);
+          if (!fs.existsSync(absolutePath)) {
+            return [];
+          }
+          const source = fs.readFileSync(absolutePath, "utf-8");
+          if (!source.includes("page.locator('text=Submit')")) {
+            return [];
+          }
+          return [{
             id: `qa_fix_${hashId(`${job.id}:${test.filePath}:${index}`)}`,
             suggestionId,
             title: `Stabilize selectors in ${path.basename(test.filePath)}`,
@@ -2440,9 +3519,98 @@ export function startDaemonServer(config: ServerConfig): http.Server {
             retestAt: null,
             retestError: null,
             retestCommand: null,
-          };
-        });
+            retestTargetPath: test.filePath,
+          }];
+          });
+        let diagnostics: NonNullable<QaGenerationJob["result"]>["intelligentFixDiagnostics"] = {
+          reason: proposals.length > 0 ? "heuristic_static_match" : "already_stabilized",
+          sourceExecutionJobId: body.sourceExecutionJobId?.trim() || null,
+          inspectedOutputLines: 0,
+          inspectedErrorContexts: 0,
+          provider: effectiveProvider,
+          supportsVision,
+          enabledSkillIds,
+          generatedAt: new Date().toISOString(),
+          details:
+            proposals.length > 0
+              ? `Generated ${proposals.length} static heuristic proposal(s).`
+              : "Static heuristics found no editable selector replacement snippets.",
+        };
+        if ((proposals ?? []).length === 0) {
+          const latestFailedExecution =
+            (body.sourceExecutionJobId ? aiExecutionJobs.get(body.sourceExecutionJobId) : undefined) ??
+            Array.from(aiExecutionJobs.values())
+              .filter((execution) => execution.status === "failed")
+              .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))[0];
+          let failedOutputLines = latestFailedExecution?.outputLines ?? [];
+          let inspectedErrorContexts = 0;
+          if (failedOutputLines.length === 0) {
+            const testResultsDir = path.resolve(process.cwd(), playwrightProjectDir, "test-results");
+            const contextFiles: string[] = [];
+            if (fs.existsSync(testResultsDir)) {
+              const queue = [testResultsDir];
+              while (queue.length > 0) {
+                const current = queue.pop()!;
+                for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+                  const fullPath = path.join(current, entry.name);
+                  if (entry.isDirectory()) {
+                    queue.push(fullPath);
+                    continue;
+                  }
+                  if (entry.isFile() && entry.name === "error-context.md") {
+                    contextFiles.push(fullPath);
+                  }
+                }
+              }
+            }
+            contextFiles
+              .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)
+              .slice(0, 6)
+              .forEach((filePath) => {
+                inspectedErrorContexts += 1;
+                failedOutputLines.push(`Error Context: ${path.relative(path.resolve(process.cwd(), playwrightProjectDir), filePath).replace(/\\/g, "/")}`);
+                failedOutputLines.push(...fs.readFileSync(filePath, "utf-8").split(/\r?\n/));
+              });
+          }
+          if (failedOutputLines.length > 0) {
+            proposals = buildSelfHealProposalsFromExecution({
+              jobId: job.id,
+              repoRoot: process.cwd(),
+              playwrightProjectDir: path.resolve(process.cwd(), playwrightProjectDir),
+              failedOutputLines,
+              maxProposals: body.maxProposals ?? 12,
+              supportsVision,
+            });
+            diagnostics = {
+              reason: proposals.length > 0 ? "fallback_execution_match" : "no_matching_skill",
+              sourceExecutionJobId: latestFailedExecution?.id ?? null,
+              inspectedOutputLines: failedOutputLines.length,
+              inspectedErrorContexts,
+              provider: effectiveProvider,
+              supportsVision,
+              enabledSkillIds,
+              generatedAt: new Date().toISOString(),
+              details:
+                proposals.length > 0
+                  ? `Generated ${proposals.length} proposal(s) from failed execution context.`
+                  : "Failed execution was inspected but no enabled skill matched this failure pattern.",
+            };
+          } else {
+            diagnostics = {
+              reason: "no_failed_execution_context",
+              sourceExecutionJobId: latestFailedExecution?.id ?? null,
+              inspectedOutputLines: 0,
+              inspectedErrorContexts: 0,
+              provider: effectiveProvider,
+              supportsVision,
+              enabledSkillIds,
+              generatedAt: new Date().toISOString(),
+              details: "No failed execution output or error-context files were found to analyze.",
+            };
+          }
+        }
         job.result.intelligentFixProposals = proposals;
+        job.result.intelligentFixDiagnostics = diagnostics;
         job.updatedAt = new Date().toISOString();
         generationJobs.set(job.id, job);
         json(res, 201, { data: job }, corsHeaders);
@@ -2465,6 +3633,52 @@ export function startDaemonServer(config: ServerConfig): http.Server {
         if (!proposal) {
           json(res, 404, { error: "qa_intelligent_fix_proposal_not_found" }, corsHeaders);
           return;
+        }
+        if (proposal.changeType === "app_plus_test") {
+          json(res, 409, { error: "qa_intelligent_fix_requires_app_change" }, corsHeaders);
+          return;
+        }
+        const diffLines = proposal.diffPreview.split(/\r?\n/);
+        const minusLines = diffLines
+          .filter((line) => line.startsWith("-") && !line.startsWith("---"))
+          .map((line) => line.slice(1));
+        const plusLines = diffLines
+          .filter((line) => line.startsWith("+") && !line.startsWith("+++"))
+          .map((line) => line.slice(1));
+        if (minusLines.length === 0 || plusLines.length === 0) {
+          proposal.status = "failed";
+          proposal.appliedAt = new Date().toISOString();
+          proposal.applyError = "Unsupported diff format in proposal preview.";
+          job.updatedAt = new Date().toISOString();
+          generationJobs.set(job.id, job);
+          json(res, 200, { data: job }, corsHeaders);
+          return;
+        }
+        const minusBlock = minusLines.join("\n");
+        const plusBlock = plusLines.join("\n");
+        const absolutePath = path.resolve(process.cwd(), proposal.filePath);
+        if (!fs.existsSync(absolutePath)) {
+          proposal.status = "failed";
+          proposal.appliedAt = new Date().toISOString();
+          proposal.applyError = `Target file not found: ${proposal.filePath}`;
+          job.updatedAt = new Date().toISOString();
+          generationJobs.set(job.id, job);
+          json(res, 200, { data: job }, corsHeaders);
+          return;
+        }
+        const source = fs.readFileSync(absolutePath, "utf-8");
+        if (!source.includes(minusBlock)) {
+          if (!source.includes(plusBlock)) {
+            proposal.status = "failed";
+            proposal.appliedAt = new Date().toISOString();
+            proposal.applyError = `Expected source snippet not found in ${proposal.filePath}.`;
+            job.updatedAt = new Date().toISOString();
+            generationJobs.set(job.id, job);
+            json(res, 200, { data: job }, corsHeaders);
+            return;
+          }
+        } else {
+          fs.writeFileSync(absolutePath, source.replace(minusBlock, plusBlock), "utf-8");
         }
         proposal.status = "applied";
         proposal.appliedAt = new Date().toISOString();
@@ -2492,10 +3706,53 @@ export function startDaemonServer(config: ServerConfig): http.Server {
           json(res, 404, { error: "qa_intelligent_fix_proposal_not_found" }, corsHeaders);
           return;
         }
-        proposal.retestStatus = "passed";
+        const resolvedProjectDir = path.resolve(process.cwd(), playwrightProjectDir);
+        const playwrightBinName = process.platform === "win32" ? "playwright.cmd" : "playwright";
+        const candidateBins = [
+          path.join(resolvedProjectDir, "node_modules", ".bin", playwrightBinName),
+          path.join(path.dirname(resolvedProjectDir), "node_modules", ".bin", playwrightBinName),
+          path.join(process.cwd(), "node_modules", ".bin", playwrightBinName),
+        ];
+        const playwrightBin = candidateBins.find((candidate) => fs.existsSync(candidate));
+        if (!playwrightBin) {
+          proposal.retestStatus = "failed";
+          proposal.retestAt = new Date().toISOString();
+          proposal.retestError = `Playwright binary not found. Checked: ${candidateBins.join(", ")}`;
+          proposal.retestCommand = "playwright test";
+          job.updatedAt = new Date().toISOString();
+          generationJobs.set(job.id, job);
+          json(res, 200, { data: job }, corsHeaders);
+          return;
+        }
+        const targetPath = proposal.retestTargetPath ?? proposal.filePath;
+        const absoluteTarget = path.resolve(process.cwd(), targetPath);
+        const relativeTarget = path.relative(resolvedProjectDir, absoluteTarget).replace(/\\/g, "/");
+        const args = ["test", "--workers=1", "--config", "playwright.config.ts", "--reporter=line", relativeTarget];
+        const command = xvfbAvailable ? "xvfb-run" : playwrightBin;
+        const commandArgs = xvfbAvailable ? ["-a", playwrightBin, ...args] : args;
+        const result = spawnSync(command, commandArgs, {
+          cwd: resolvedProjectDir,
+          env: {
+            ...process.env,
+            NODE_PATH: [path.join(resolvedProjectDir, "node_modules"), process.env.NODE_PATH ?? ""]
+              .filter(Boolean)
+              .join(path.delimiter),
+          },
+          encoding: "utf-8",
+          maxBuffer: 1024 * 1024 * 8,
+        });
+        proposal.retestStatus = result.status === 0 ? "passed" : "failed";
         proposal.retestAt = new Date().toISOString();
-        proposal.retestError = null;
-        proposal.retestCommand = `npm --prefix e2e/ui run test -- "${proposal.filePath}"`;
+        proposal.retestError =
+          result.status === 0
+            ? null
+            : `${result.stdout ?? ""}\n${result.stderr ?? ""}`
+                .split(/\r?\n/)
+                .map((line) => stripAnsi(line).trim())
+                .filter(Boolean)
+                .slice(-20)
+                .join("\n") || `Playwright retest failed with code ${result.status ?? "unknown"}.`;
+        proposal.retestCommand = `${command} ${commandArgs.join(" ")}`;
         job.updatedAt = new Date().toISOString();
         generationJobs.set(job.id, job);
         json(res, 200, { data: job }, corsHeaders);
@@ -2505,42 +3762,512 @@ export function startDaemonServer(config: ServerConfig): http.Server {
       return;
     }
 
-    if (req.method === "POST" && req.url === "/plugin/qa/tests/automation/run") {
+    if (req.method === "POST" && req.url === "/plugin/qa/tests/automation/start") {
       try {
-        const body = (await readRequestBody<{ generationJobId?: string; strategy?: "continuous_fix" | "alert_only"; maxIterations?: number }>(req)) ?? {};
+        const body = (await readRequestBody<{ generationJobId?: string; strategy?: "continuous_fix" | "alert_only"; maxIterations?: number; sourceExecutionJobId?: string }>(req)) ?? {};
         const job = generationJobs.get(body.generationJobId?.trim() ?? "");
         if (!job) {
           json(res, 404, { error: "qa_generation_job_not_found" }, corsHeaders);
           return;
         }
-        const proposals = job.result?.intelligentFixProposals ?? [];
+        const executionId = `qa_auto_${hashId(`${job.id}:${Date.now()}`)}`;
+        const now = new Date().toISOString();
+        const execution: QaAutomationExecutionJob = {
+          id: executionId,
+          generationJobId: job.id,
+          strategy: body.strategy ?? "continuous_fix",
+          status: "queued",
+          progressPercent: 0,
+          totalProposals: 0,
+          processedProposals: 0,
+          currentStep: "Queued",
+          startedAt: null,
+          completedAt: null,
+          error: null,
+          createdAt: now,
+          updatedAt: now,
+        };
+        automationExecutionJobs.set(executionId, execution);
+        json(res, 202, { data: execution }, corsHeaders);
+
+        const runAsync = async (): Promise<void> => {
+          const current = automationExecutionJobs.get(executionId);
+          if (!current) {
+            return;
+          }
+          const resolvedProjectDir = path.resolve(process.cwd(), playwrightProjectDir);
+          const playwrightBinName = process.platform === "win32" ? "playwright.cmd" : "playwright";
+          const candidateBins = [
+            path.join(resolvedProjectDir, "node_modules", ".bin", playwrightBinName),
+            path.join(path.dirname(resolvedProjectDir), "node_modules", ".bin", playwrightBinName),
+            path.join(process.cwd(), "node_modules", ".bin", playwrightBinName),
+          ];
+          const playwrightBin = candidateBins.find((candidate) => fs.existsSync(candidate));
+          const updateStatus = (patch: Partial<QaAutomationExecutionJob>): void => {
+            const latest = automationExecutionJobs.get(executionId);
+            if (!latest) {
+              return;
+            }
+            Object.assign(latest, patch, { updatedAt: new Date().toISOString() });
+            automationExecutionJobs.set(executionId, latest);
+          };
+          const applyDiffPreview = (proposal: { filePath: string; diffPreview: string }): { ok: boolean; error?: string } => {
+            const absoluteFilePath = path.resolve(process.cwd(), proposal.filePath);
+            if (!fs.existsSync(absoluteFilePath)) {
+              return { ok: false, error: `Target file not found: ${proposal.filePath}` };
+            }
+            const diffLines = proposal.diffPreview.split(/\r?\n/);
+            const minusLines = diffLines
+              .filter((line) => line.startsWith("-") && !line.startsWith("---"))
+              .map((line) => line.slice(1));
+            const plusLines = diffLines
+              .filter((line) => line.startsWith("+") && !line.startsWith("+++"))
+              .map((line) => line.slice(1));
+            if (minusLines.length === 0 || plusLines.length === 0) {
+              return { ok: false, error: "Unsupported diff format in proposal preview." };
+            }
+            const minusBlock = minusLines.join("\n");
+            const plusBlock = plusLines.join("\n");
+            const source = fs.readFileSync(absoluteFilePath, "utf-8");
+            if (!source.includes(minusBlock)) {
+              if (source.includes(plusBlock)) {
+                return { ok: true };
+              }
+              return { ok: false, error: `Expected source snippet not found in ${proposal.filePath}.` };
+            }
+            fs.writeFileSync(absoluteFilePath, source.replace(minusBlock, plusBlock), "utf-8");
+            return { ok: true };
+          };
+          const runRetest = async (targetPath: string): Promise<{ passed: boolean; command: string; error?: string }> => {
+            if (!playwrightBin) {
+              return {
+                passed: false,
+                command: "playwright test",
+                error: `Playwright binary not found. Checked: ${candidateBins.join(", ")}`,
+              };
+            }
+            const absoluteTarget = path.resolve(process.cwd(), targetPath);
+            const relativeTarget = path.relative(resolvedProjectDir, absoluteTarget).replace(/\\/g, "/");
+            const args = ["test", "--workers=1", "--config", "playwright.config.ts", "--reporter=line", relativeTarget];
+            const command = xvfbAvailable ? "xvfb-run" : playwrightBin;
+            const commandArgs = xvfbAvailable ? ["-a", playwrightBin, ...args] : args;
+            return await new Promise((resolve) => {
+              const child = spawn(command, commandArgs, {
+                cwd: resolvedProjectDir,
+                env: {
+                  ...process.env,
+                  NODE_PATH: [path.join(resolvedProjectDir, "node_modules"), process.env.NODE_PATH ?? ""]
+                    .filter(Boolean)
+                    .join(path.delimiter),
+                },
+                stdio: ["ignore", "pipe", "pipe"],
+              });
+              const chunks: string[] = [];
+              const onChunk = (chunk: Buffer): void => {
+                chunks.push(chunk.toString("utf-8"));
+              };
+              child.stdout?.on("data", onChunk);
+              child.stderr?.on("data", onChunk);
+              child.on("close", (code) => {
+                const commandText = `${command} ${commandArgs.join(" ")}`;
+                if (code === 0) {
+                  resolve({ passed: true, command: commandText });
+                  return;
+                }
+                const output = chunks
+                  .join("\n")
+                  .split(/\r?\n/)
+                  .map((line) => stripAnsi(line).trim())
+                  .filter(Boolean)
+                  .slice(-20)
+                  .join("\n");
+                resolve({
+                  passed: false,
+                  command: commandText,
+                  error: output || `Playwright retest failed with code ${code ?? "unknown"}.`,
+                });
+              });
+              child.on("error", (error) => {
+                resolve({
+                  passed: false,
+                  command: `${command} ${commandArgs.join(" ")}`,
+                  error: error instanceof Error ? error.message : String(error),
+                });
+              });
+            });
+          };
+
+          try {
+            updateStatus({ status: "running", startedAt: new Date().toISOString(), progressPercent: 5, currentStep: "Initializing" });
+            let proposals = job.result?.intelligentFixProposals ?? [];
+            let latestFailedExecution: QaAiExecutionJob | undefined;
+            if ((body.strategy ?? "continuous_fix") === "continuous_fix") {
+              const eligiblePending = proposals.filter((item) => item.status !== "applied" && item.changeType !== "app_plus_test");
+              if (eligiblePending.length === 0) {
+                latestFailedExecution =
+                  (body.sourceExecutionJobId ? aiExecutionJobs.get(body.sourceExecutionJobId) : undefined) ??
+                  Array.from(aiExecutionJobs.values())
+                    .filter((item) => item.status === "failed")
+                    .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))[0];
+                if (latestFailedExecution) {
+                  const effectiveProvider = resolveEffectiveAiProvider();
+                  const supportsVision =
+                    aiProviderCapabilities.find((provider) => provider.id === effectiveProvider)?.supportsVision ?? false;
+                  proposals = buildSelfHealProposalsFromExecution({
+                    jobId: job.id,
+                    repoRoot: process.cwd(),
+                    playwrightProjectDir: resolvedProjectDir,
+                    failedOutputLines: latestFailedExecution.outputLines,
+                    maxProposals: body.maxIterations ?? 12,
+                    supportsVision,
+                  });
+                }
+              }
+            }
+
+            const startedAt = new Date().toISOString();
+            const actionable = proposals
+              .filter((proposal) => proposal.status !== "applied")
+              .slice(0, Math.max(1, body.maxIterations ?? proposals.length));
+            const pendingBefore = actionable.length;
+            updateStatus({
+              totalProposals: actionable.length,
+              processedProposals: 0,
+              progressPercent: actionable.length > 0 ? 15 : 100,
+              currentStep: actionable.length > 0 ? "Applying fixes" : "No pending proposals",
+            });
+
+            let skippedRequiresAppChange = 0;
+            let failedRetests = 0;
+            let passedRetests = 0;
+            let appliedCount = 0;
+
+            for (let index = 0; index < actionable.length; index += 1) {
+              const proposal = actionable[index]!;
+              updateStatus({
+                processedProposals: index,
+                progressPercent: Math.min(95, 15 + Math.floor((index / Math.max(1, actionable.length)) * 80)),
+                currentStep: `Processing ${proposal.title}`,
+              });
+              if (proposal.changeType === "app_plus_test") {
+                skippedRequiresAppChange += 1;
+                proposal.status = "failed";
+                proposal.applyError = "Requires app code change; auto-apply blocked.";
+                proposal.retestStatus = "not_run";
+                proposal.retestError = "Skipped because this proposal requires app changes.";
+                proposal.retestCommand = null;
+                continue;
+              }
+              const applyResult = applyDiffPreview(proposal);
+              if (!applyResult.ok) {
+                proposal.status = "failed";
+                proposal.appliedAt = startedAt;
+                proposal.applyError = applyResult.error ?? "Failed to apply patch.";
+                proposal.retestStatus = "not_run";
+                proposal.retestAt = startedAt;
+                proposal.retestError = "Skipped retest because patch did not apply.";
+                proposal.retestCommand = null;
+                failedRetests += 1;
+                continue;
+              }
+              proposal.status = "applied";
+              proposal.appliedAt = startedAt;
+              proposal.applyError = null;
+              appliedCount += 1;
+              updateStatus({
+                currentStep: `Retesting ${proposal.filePath}`,
+              });
+              const retest = await runRetest(proposal.retestTargetPath ?? proposal.filePath);
+              proposal.retestCommand = retest.command;
+              proposal.retestAt = new Date().toISOString();
+              if (retest.passed) {
+                proposal.retestStatus = "passed";
+                proposal.retestError = null;
+                passedRetests += 1;
+              } else {
+                proposal.retestStatus = "failed";
+                proposal.retestError = retest.error ?? "Retest failed.";
+                failedRetests += 1;
+              }
+            }
+
+            const pendingAfter = proposals.filter((item) => item.status !== "applied").length;
+            const fixedLike =
+              pendingBefore > 0 &&
+              pendingAfter === 0 &&
+              skippedRequiresAppChange === 0 &&
+              failedRetests === 0;
+            const hadFailedSourceExecution = Boolean(
+              latestFailedExecution && latestFailedExecution.status === "failed",
+            );
+            const cleanLike = pendingBefore === 0 && !hadFailedSourceExecution;
+            job.result = {
+              ...(job.result ?? { suiteName: "Existing Playwright Suite", cases: [] }),
+              intelligentFixProposals: proposals,
+              automation: {
+                strategy: body.strategy ?? "alert_only",
+                status: cleanLike ? "clean" : fixedLike ? "fixed" : pendingBefore === 0 ? "attention" : "partial",
+                startedAt,
+                completedAt: new Date().toISOString(),
+                iterations: actionable.length,
+                appliedCount,
+                passedRetests,
+                failedRetests: failedRetests + skippedRequiresAppChange,
+                remainingProposals: pendingAfter,
+                message: cleanLike
+                  ? "No pending self-heal proposals were available."
+                  : pendingBefore === 0
+                    ? "Run failed but no matching self-heal rule produced a proposal. Review trace/video and add a skill."
+                    : `Applied ${appliedCount} proposal(s); passed retests ${passedRetests}; failed retests ${failedRetests}.`,
+              },
+            };
+            job.updatedAt = new Date().toISOString();
+            generationJobs.set(job.id, job);
+            updateStatus({
+              status: "completed",
+              completedAt: new Date().toISOString(),
+              progressPercent: 100,
+              processedProposals: actionable.length,
+              currentStep: "Completed",
+            });
+          } catch (error) {
+            updateStatus({
+              status: "failed",
+              completedAt: new Date().toISOString(),
+              progressPercent: 100,
+              currentStep: "Failed",
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        };
+        void runAsync();
+      } catch {
+        json(res, 500, { error: "qa_automation_start_failed" }, corsHeaders);
+      }
+      return;
+    }
+
+    if (req.method === "GET" && req.url?.match(/^\/plugin\/qa\/tests\/automation\/executions\/[^/?#]+$/)) {
+      const match = req.url.match(/^\/plugin\/qa\/tests\/automation\/executions\/([^/?#]+)$/);
+      const executionId = match?.[1] ?? "";
+      const execution = automationExecutionJobs.get(executionId);
+      if (!execution) {
+        json(res, 404, { error: "qa_automation_execution_not_found" }, corsHeaders);
+        return;
+      }
+      json(res, 200, { data: execution }, corsHeaders);
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/plugin/qa/tests/automation/run") {
+      try {
+        const body = (await readRequestBody<{ generationJobId?: string; strategy?: "continuous_fix" | "alert_only"; maxIterations?: number; sourceExecutionJobId?: string }>(req)) ?? {};
+        const job = generationJobs.get(body.generationJobId?.trim() ?? "");
+        if (!job) {
+          json(res, 404, { error: "qa_generation_job_not_found" }, corsHeaders);
+          return;
+        }
+        const resolvedProjectDir = path.resolve(process.cwd(), playwrightProjectDir);
+        const playwrightBinName = process.platform === "win32" ? "playwright.cmd" : "playwright";
+        const candidateBins = [
+          path.join(resolvedProjectDir, "node_modules", ".bin", playwrightBinName),
+          path.join(path.dirname(resolvedProjectDir), "node_modules", ".bin", playwrightBinName),
+          path.join(process.cwd(), "node_modules", ".bin", playwrightBinName),
+        ];
+        const playwrightBin = candidateBins.find((candidate) => fs.existsSync(candidate));
+        const applyDiffPreview = (proposal: {
+          filePath: string;
+          diffPreview: string;
+        }): { ok: boolean; error?: string } => {
+          const absoluteFilePath = path.resolve(process.cwd(), proposal.filePath);
+          if (!fs.existsSync(absoluteFilePath)) {
+            return { ok: false, error: `Target file not found: ${proposal.filePath}` };
+          }
+          const diffLines = proposal.diffPreview.split(/\r?\n/);
+          const minusLines = diffLines
+            .filter((line) => line.startsWith("-") && !line.startsWith("---"))
+            .map((line) => line.slice(1));
+          const plusLines = diffLines
+            .filter((line) => line.startsWith("+") && !line.startsWith("+++"))
+            .map((line) => line.slice(1));
+          if (minusLines.length === 0 || plusLines.length === 0) {
+            return { ok: false, error: "Unsupported diff format in proposal preview." };
+          }
+          const minusBlock = minusLines.join("\n");
+          const plusBlock = plusLines.join("\n");
+          const source = fs.readFileSync(absoluteFilePath, "utf-8");
+          if (!source.includes(minusBlock)) {
+            if (source.includes(plusBlock)) {
+              return { ok: true };
+            }
+            return { ok: false, error: `Expected source snippet not found in ${proposal.filePath}.` };
+          }
+          fs.writeFileSync(absoluteFilePath, source.replace(minusBlock, plusBlock), "utf-8");
+          return { ok: true };
+        };
+        const runRetest = (targetPath: string): { passed: boolean; command: string; error?: string } => {
+          if (!playwrightBin) {
+            return {
+              passed: false,
+              command: "playwright test",
+              error: `Playwright binary not found. Checked: ${candidateBins.join(", ")}`,
+            };
+          }
+          const absoluteTarget = path.resolve(process.cwd(), targetPath);
+          const relativeTarget = path.relative(resolvedProjectDir, absoluteTarget).replace(/\\/g, "/");
+          const args = [
+            "test",
+            "--workers=1",
+            "--config",
+            "playwright.config.ts",
+            "--reporter=line",
+            relativeTarget,
+          ];
+          const command = xvfbAvailable ? "xvfb-run" : playwrightBin;
+          const commandArgs = xvfbAvailable ? ["-a", playwrightBin, ...args] : args;
+          const result = spawnSync(command, commandArgs, {
+            cwd: resolvedProjectDir,
+            env: {
+              ...process.env,
+              NODE_PATH: [
+                path.join(resolvedProjectDir, "node_modules"),
+                process.env.NODE_PATH ?? "",
+              ]
+                .filter(Boolean)
+                .join(path.delimiter),
+            },
+            encoding: "utf-8",
+            maxBuffer: 1024 * 1024 * 8,
+          });
+          const commandText = `${command} ${commandArgs.join(" ")}`;
+          if (result.status === 0) {
+            return { passed: true, command: commandText };
+          }
+          const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`
+            .split(/\r?\n/)
+            .map((line) => stripAnsi(line).trim())
+            .filter(Boolean)
+            .slice(-20)
+            .join("\n");
+          return {
+            passed: false,
+            command: commandText,
+            error: output || `Playwright retest failed with code ${result.status ?? "unknown"}.`,
+          };
+        };
+
+        let proposals = job.result?.intelligentFixProposals ?? [];
+        let latestFailedExecution: QaAiExecutionJob | undefined;
+        if (body.strategy === "continuous_fix") {
+          const eligiblePending = proposals.filter((item) => item.status !== "applied" && item.changeType !== "app_plus_test");
+          if (eligiblePending.length === 0) {
+            latestFailedExecution =
+              (body.sourceExecutionJobId ? aiExecutionJobs.get(body.sourceExecutionJobId) : undefined) ??
+              Array.from(aiExecutionJobs.values())
+                .filter((execution) => execution.status === "failed")
+                .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))[0];
+            if (latestFailedExecution) {
+              const effectiveProvider = resolveEffectiveAiProvider();
+              const supportsVision =
+                aiProviderCapabilities.find((provider) => provider.id === effectiveProvider)?.supportsVision ?? false;
+              const generated = buildSelfHealProposalsFromExecution({
+                jobId: job.id,
+                repoRoot: process.cwd(),
+                playwrightProjectDir: resolvedProjectDir,
+                failedOutputLines: latestFailedExecution.outputLines,
+                maxProposals: body.maxIterations ?? 12,
+                supportsVision,
+              });
+              if (generated.length > 0) {
+                proposals = generated;
+              }
+            }
+          }
+        }
+
         const pendingBefore = proposals.filter((item) => item.status !== "applied").length;
         const startedAt = new Date().toISOString();
+        let skippedRequiresAppChange = 0;
+        let failedRetests = 0;
+        let passedRetests = 0;
+        let appliedCount = 0;
         if (body.strategy === "continuous_fix") {
-          for (const proposal of proposals) {
+          const actionable = proposals
+            .filter((proposal) => proposal.status !== "applied")
+            .slice(0, Math.max(1, body.maxIterations ?? proposals.length));
+          for (const proposal of actionable) {
+            if (proposal.changeType === "app_plus_test") {
+              skippedRequiresAppChange += 1;
+              proposal.status = "failed";
+              proposal.applyError = "Requires app code change; auto-apply blocked.";
+              proposal.retestStatus = "not_run";
+              proposal.retestError = "Skipped because this proposal requires app changes.";
+              proposal.retestCommand = null;
+              continue;
+            }
+            const applyResult = applyDiffPreview(proposal);
+            if (!applyResult.ok) {
+              proposal.status = "failed";
+              proposal.appliedAt = startedAt;
+              proposal.applyError = applyResult.error ?? "Failed to apply patch.";
+              proposal.retestStatus = "not_run";
+              proposal.retestAt = startedAt;
+              proposal.retestError = "Skipped retest because patch did not apply.";
+              proposal.retestCommand = null;
+              failedRetests += 1;
+              continue;
+            }
             proposal.status = "applied";
             proposal.appliedAt = startedAt;
-            proposal.retestStatus = "passed";
-            proposal.retestAt = startedAt;
+            proposal.applyError = null;
+            appliedCount += 1;
+            const retestTargetPath = proposal.retestTargetPath ?? proposal.filePath;
+            const retest = runRetest(retestTargetPath);
+            proposal.retestCommand = retest.command;
+            proposal.retestAt = new Date().toISOString();
+            if (retest.passed) {
+              proposal.retestStatus = "passed";
+              proposal.retestError = null;
+              passedRetests += 1;
+            } else {
+              proposal.retestStatus = "failed";
+              proposal.retestError = retest.error ?? "Retest failed.";
+              failedRetests += 1;
+            }
           }
         }
         const pendingAfter = proposals.filter((item) => item.status !== "applied").length;
+        const fixedLike =
+          pendingBefore > 0 &&
+          pendingAfter === 0 &&
+          skippedRequiresAppChange === 0 &&
+          failedRetests === 0;
+        const hadFailedSourceExecution = Boolean(
+          latestFailedExecution && latestFailedExecution.status === "failed",
+        );
+        const cleanLike = pendingBefore === 0 && !hadFailedSourceExecution;
         job.result = {
           ...(job.result ?? { suiteName: "Existing Playwright Suite", cases: [] }),
           intelligentFixProposals: proposals,
           automation: {
             strategy: body.strategy ?? "alert_only",
-            status: pendingAfter === 0 ? "fixed" : "partial",
+            status: cleanLike ? "clean" : fixedLike ? "fixed" : pendingBefore === 0 ? "attention" : "partial",
             startedAt,
             completedAt: new Date().toISOString(),
             iterations: body.strategy === "continuous_fix" ? Math.min(proposals.length, body.maxIterations ?? proposals.length) : 0,
-            appliedCount: pendingBefore - pendingAfter,
-            passedRetests: body.strategy === "continuous_fix" ? pendingBefore - pendingAfter : 0,
-            failedRetests: 0,
+            appliedCount,
+            passedRetests: body.strategy === "continuous_fix" ? passedRetests : 0,
+            failedRetests: body.strategy === "continuous_fix" ? failedRetests + skippedRequiresAppChange : 0,
             remainingProposals: pendingAfter,
             message:
               body.strategy === "continuous_fix"
-                ? `Applied ${pendingBefore - pendingAfter} proposal(s) with simulated retest pass.`
+                ? cleanLike
+                  ? "No pending self-heal proposals were available."
+                  : pendingBefore === 0
+                    ? "Run failed but no matching self-heal rule produced a proposal. Review trace/video and add a skill."
+                  : skippedRequiresAppChange > 0
+                    ? `Applied ${appliedCount} proposal(s); passed retests ${passedRetests}; failed retests ${failedRetests}; skipped ${skippedRequiresAppChange} proposal(s) that require app code changes.`
+                    : `Applied ${appliedCount} proposal(s); passed retests ${passedRetests}; failed retests ${failedRetests}.`
                 : `Alert-only mode found ${pendingBefore} pending proposal(s).`,
           },
         };
@@ -2575,6 +4302,11 @@ export function startDaemonServer(config: ServerConfig): http.Server {
           id: executionJobId,
           runId,
           status: "queued",
+          executionMode: defaultExecutionMode,
+          mcpTransport: defaultExecutionMode === "mcp" ? mcpTransport : null,
+          mcpEndpoint: defaultExecutionMode === "mcp" ? mcpUrl : null,
+          mcpSessionId: null,
+          mcpActionCount: 0,
           currentCaseId: null,
           currentStepId: null,
           currentStepIndex: 0,
@@ -2604,9 +4336,15 @@ export function startDaemonServer(config: ServerConfig): http.Server {
           202,
           {
             data: {
+              id: executionJobId,
               runId,
               executionJobId,
               status: execution.status,
+              executionMode: execution.executionMode,
+              mcpTransport: execution.mcpTransport ?? null,
+              mcpEndpoint: execution.mcpEndpoint ?? null,
+              mcpSessionId: execution.mcpSessionId ?? null,
+              mcpActionCount: execution.mcpActionCount ?? 0,
               currentStepIndex: 0,
               totalSteps,
               failureReason: null,
@@ -2615,6 +4353,7 @@ export function startDaemonServer(config: ServerConfig): http.Server {
               completedAt: null,
               createdAt: now,
               updatedAt: now,
+              actionLog: [],
             },
           },
           corsHeaders,
@@ -2656,8 +4395,20 @@ export function startDaemonServer(config: ServerConfig): http.Server {
           runId,
           status: "queued",
           playwrightCommand: "npx playwright test",
-          executionMode: defaultExecutionMode,
+          executionMode: defaultAiExecutionMode,
           playwrightUiUrl: null,
+          progressPercent: 0,
+          totalTests: null,
+          completedTests: 0,
+          currentTest: null,
+          lastActivity: "Execution prepared",
+          lastActivityAt: now,
+          processAlive: false,
+          outputLines: [],
+          reportRootDir: null,
+          traceFilePath: null,
+          videoFilePath: null,
+          videoMp4FilePath: null,
           reportRef: null,
           traceRef: null,
           videoRef: null,
@@ -2706,13 +4457,25 @@ export function startDaemonServer(config: ServerConfig): http.Server {
           return;
         }
         const requestedMode =
-          body.runMode === "stub" || body.runMode === "shell" || body.runMode === "ui" ? body.runMode : defaultExecutionMode;
+          body.runMode === "stub" || body.runMode === "shell" || body.runMode === "ui" ? body.runMode : defaultAiExecutionMode;
         const startedAt = new Date().toISOString();
         execution.status = "running";
         execution.executionMode = requestedMode;
         execution.startedAt = startedAt;
         execution.completedAt = null;
         execution.error = null;
+        execution.progressPercent = 5;
+        execution.totalTests = null;
+        execution.completedTests = 0;
+        execution.currentTest = null;
+        execution.lastActivity = "Starting Playwright execution";
+        execution.lastActivityAt = startedAt;
+        execution.processAlive = false;
+        execution.outputLines = [];
+        execution.reportRootDir = null;
+        execution.traceFilePath = null;
+        execution.videoFilePath = null;
+        execution.videoMp4FilePath = null;
         execution.reportRef = null;
         execution.traceRef = null;
         execution.videoRef = null;
@@ -2723,6 +4486,13 @@ export function startDaemonServer(config: ServerConfig): http.Server {
         if (requestedMode === "stub") {
           execution.status = "completed";
           execution.completedAt = startedAt;
+          execution.progressPercent = 100;
+          execution.lastActivity = "Stub execution completed";
+          execution.lastActivityAt = startedAt;
+          execution.reportRootDir = null;
+          execution.traceFilePath = null;
+          execution.videoFilePath = null;
+          execution.videoMp4FilePath = null;
           execution.reportRef = `qa://playwright/${runId}/${executionJobId}/report.json`;
           execution.traceRef = `qa://playwright/${runId}/${executionJobId}/trace.zip`;
           execution.videoRef = `qa://playwright/${runId}/${executionJobId}/video.webm`;
@@ -2732,17 +4502,31 @@ export function startDaemonServer(config: ServerConfig): http.Server {
         } else {
           const resolvedProjectDir = path.resolve(process.cwd(), playwrightProjectDir);
           const playwrightBinName = process.platform === "win32" ? "playwright.cmd" : "playwright";
-          const playwrightBin = path.join(resolvedProjectDir, "node_modules", ".bin", playwrightBinName);
-          if (!fs.existsSync(playwrightBin)) {
+          const candidateBins = [
+            path.join(resolvedProjectDir, "node_modules", ".bin", playwrightBinName),
+            path.join(path.dirname(resolvedProjectDir), "node_modules", ".bin", playwrightBinName),
+            path.join(process.cwd(), "node_modules", ".bin", playwrightBinName),
+          ];
+          const playwrightBin = candidateBins.find((candidate) => fs.existsSync(candidate));
+          if (!playwrightBin) {
             execution.status = "failed";
-            execution.error = `Playwright binary not found at ${playwrightBin}. Install dependencies in ${resolvedProjectDir} first.`;
+            execution.error = `Playwright binary not found. Checked: ${candidateBins.join(", ")}. Install dependencies in ${resolvedProjectDir} (or parent e2e directory) first.`;
             execution.completedAt = startedAt;
+            execution.progressPercent = 100;
+            execution.lastActivity = "Failed before launch";
+            execution.lastActivityAt = startedAt;
             execution.updatedAt = startedAt;
             aiExecutionJobs.set(executionJobId, execution);
             responseStatus = "failed";
           } else {
             // Be explicit about config so UI mode always finds tests.
-            const args = ["test", "--workers=1", "--config", "playwright.config.ts"];
+            const args = [
+              "test",
+              "--workers=1",
+              "--config",
+              "playwright.config.ts",
+              "--reporter=line",
+            ];
             if (requestedMode === "ui") {
               // Bind and advertise the same host to avoid ws/url mismatches.
               args.push("--ui", "--ui-host", playwrightUiHost, "--ui-port", String(playwrightUiPort));
@@ -2757,9 +4541,70 @@ export function startDaemonServer(config: ServerConfig): http.Server {
 
           const runProcess = spawn(command, commandArgs, {
             cwd: resolvedProjectDir,
-            env: process.env,
-            stdio: "ignore",
+            env: {
+              ...process.env,
+              NODE_PATH: [
+                path.join(resolvedProjectDir, "node_modules"),
+                process.env.NODE_PATH ?? "",
+              ]
+                .filter(Boolean)
+                .join(path.delimiter),
+            },
+            stdio: ["ignore", "pipe", "pipe"],
           });
+          const referencedVideoPaths: string[] = [];
+          const referencedTracePaths: string[] = [];
+          execution.processAlive = true;
+          execution.lastActivityAt = new Date().toISOString();
+          aiExecutionJobs.set(executionJobId, execution);
+          const updateExecutionActivity = (chunk: Buffer): void => {
+            const current = aiExecutionJobs.get(executionJobId);
+            if (!current || current.status !== "running") {
+              return;
+            }
+            const lines = chunk
+              .toString("utf-8")
+              .split(/\r?\n/)
+              .map((line) => stripAnsi(line).trim())
+              .filter(Boolean);
+            for (const line of lines) {
+              current.outputLines.push(line.slice(0, 500));
+              if (current.outputLines.length > 120) {
+                current.outputLines = current.outputLines.slice(-120);
+              }
+              const videoMatch = line.match(/test-results\/.+\/video\.webm$/);
+              if (videoMatch) {
+                referencedVideoPaths.push(path.resolve(resolvedProjectDir, videoMatch[0]));
+              }
+              const traceMatch = line.match(/test-results\/.+\/trace\.zip$/);
+              if (traceMatch) {
+                referencedTracePaths.push(path.resolve(resolvedProjectDir, traceMatch[0]));
+              }
+              const parsed = parsePlaywrightProgress(line);
+              if (typeof parsed.totalTests === "number" && parsed.totalTests > 0) {
+                current.totalTests = parsed.totalTests;
+              }
+              if (typeof parsed.completedTests === "number") {
+                current.completedTests = Math.max(current.completedTests, parsed.completedTests);
+              }
+              if (parsed.currentTest) {
+                current.currentTest = parsed.currentTest;
+              }
+              current.lastActivity = line.slice(0, 300);
+            }
+            if (current.totalTests && current.totalTests > 0) {
+              const ratio = current.completedTests / current.totalTests;
+              current.progressPercent = Math.min(98, Math.max(8, Math.floor(ratio * 100)));
+            } else {
+              current.progressPercent = Math.min(60, current.progressPercent + 2);
+            }
+            current.processAlive = true;
+            current.lastActivityAt = new Date().toISOString();
+            current.updatedAt = new Date().toISOString();
+            aiExecutionJobs.set(executionJobId, current);
+          };
+          runProcess.stdout?.on("data", (chunk: Buffer) => updateExecutionActivity(chunk));
+          runProcess.stderr?.on("data", (chunk: Buffer) => updateExecutionActivity(chunk));
           aiExecutionProcesses.set(executionJobId, runProcess);
           runProcess.on("error", (error) => {
             const current = aiExecutionJobs.get(executionJobId);
@@ -2770,6 +4615,10 @@ export function startDaemonServer(config: ServerConfig): http.Server {
             current.status = "failed";
             current.error = error instanceof Error ? error.message : String(error);
             current.completedAt = now;
+            current.progressPercent = 100;
+            current.lastActivity = "Execution process error";
+            current.lastActivityAt = now;
+            current.processAlive = false;
             current.updatedAt = now;
             aiExecutionJobs.set(executionJobId, current);
             aiExecutionProcesses.delete(executionJobId);
@@ -2781,11 +4630,46 @@ export function startDaemonServer(config: ServerConfig): http.Server {
             }
             const now = new Date().toISOString();
             current.status = code === 0 ? "completed" : "failed";
-            current.error = code === 0 ? null : `Playwright exited with code ${code ?? "unknown"}`;
-            current.completedAt = now;
-            current.updatedAt = now;
             if (code === 0) {
-              current.reportRef = `file:${path.join(resolvedProjectDir, "playwright-report", "index.html")}`;
+              current.error = null;
+            } else {
+              const tail = current.outputLines.slice(-8).join("\n");
+              current.error = tail
+                ? `Playwright exited with code ${code ?? "unknown"}\n${tail}`
+                : `Playwright exited with code ${code ?? "unknown"}`;
+            }
+            current.completedAt = now;
+            current.progressPercent = 100;
+            current.lastActivity = code === 0 ? "Execution completed" : "Execution failed";
+            current.lastActivityAt = now;
+            current.processAlive = false;
+            current.updatedAt = now;
+            const reportRootDir = path.join(resolvedProjectDir, "playwright-report");
+            if (fs.existsSync(path.join(reportRootDir, "index.html"))) {
+              current.reportRootDir = reportRootDir;
+              current.reportRef = `/plugin/qa/runs/${encodeURIComponent(runId)}/ai/executions/${encodeURIComponent(executionJobId)}/report`;
+            }
+            const testResultsDir = path.join(resolvedProjectDir, "test-results");
+            const tracePath =
+              pickLargestExistingFile(referencedTracePaths) ??
+              findNewestFileByName(testResultsDir, "trace.zip");
+            const videoPath =
+              pickLargestExistingFile(referencedVideoPaths) ??
+              findNewestFileByName(testResultsDir, "video.webm");
+            current.traceFilePath = tracePath;
+            current.videoFilePath = videoPath;
+            current.videoMp4FilePath = null;
+            if (tracePath) {
+              current.traceRef = `/plugin/qa/runs/${encodeURIComponent(runId)}/ai/executions/${encodeURIComponent(executionJobId)}/artifacts/trace`;
+            }
+            if (videoPath) {
+              current.videoRef = `/plugin/qa/runs/${encodeURIComponent(runId)}/ai/executions/${encodeURIComponent(executionJobId)}/artifacts/video`;
+            }
+            if (code === 0 && current.totalTests && current.totalTests > 0) {
+              current.completedTests = current.totalTests;
+            }
+            if (code === 0) {
+              current.currentTest = null;
             }
             aiExecutionJobs.set(executionJobId, current);
             aiExecutionProcesses.delete(executionJobId);
@@ -2804,6 +4688,20 @@ export function startDaemonServer(config: ServerConfig): http.Server {
               completedAt: null,
               playwrightCommand: execution.playwrightCommand,
               playwrightUiUrl: execution.playwrightUiUrl ?? "",
+              progressPercent: execution.progressPercent,
+              totalTests: execution.totalTests,
+              completedTests: execution.completedTests,
+              currentTest: execution.currentTest,
+              lastActivity: execution.lastActivity,
+              lastActivityAt: execution.lastActivityAt,
+              processAlive: execution.processAlive,
+              outputLines: execution.outputLines,
+              stalled:
+                execution.status === "running" &&
+                execution.processAlive &&
+                execution.lastActivityAt
+                  ? Date.now() - new Date(execution.lastActivityAt).getTime() > 90000
+                  : false,
               artifacts: {
                 reportRef: execution.reportRef ?? "",
                 traceRef: execution.traceRef ?? "",
@@ -2819,6 +4717,260 @@ export function startDaemonServer(config: ServerConfig): http.Server {
       return;
     }
 
+    if (req.method === "GET" && req.url?.match(/^\/plugin\/qa\/runs\/[^/]+\/ai\/executions\/[^/]+\/report$/)) {
+      const match = req.url.match(/^\/plugin\/qa\/runs\/([^/]+)\/ai\/executions\/([^/]+)\/report$/);
+      const runId = match?.[1] ?? "";
+      const executionJobId = match?.[2] ?? "";
+      const execution = aiExecutionJobs.get(executionJobId);
+      if (!execution || execution.runId !== runId || !execution.reportRootDir) {
+        json(res, 404, { error: "qa_ai_report_not_found" }, corsHeaders);
+        return;
+      }
+      const indexPath = path.join(execution.reportRootDir, "index.html");
+      if (!fs.existsSync(indexPath)) {
+        json(res, 404, { error: "qa_ai_report_index_not_found" }, corsHeaders);
+        return;
+      }
+      const raw = fs.readFileSync(indexPath, "utf-8");
+      const baseHref = `/plugin/qa/runs/${encodeURIComponent(runId)}/ai/executions/${encodeURIComponent(executionJobId)}/report-assets/`;
+      const html = raw.includes("<head>")
+        ? raw.replace("<head>", `<head><base href="${baseHref}">`)
+        : raw;
+      text(res, 200, html, "text/html", corsHeaders);
+      return;
+    }
+
+    if (req.method === "GET" && req.url?.match(/^\/plugin\/qa\/runs\/[^/]+\/ai\/executions\/[^/]+\/report-assets\/.+$/)) {
+      const match = req.url.match(/^\/plugin\/qa\/runs\/([^/]+)\/ai\/executions\/([^/]+)\/report-assets\/(.+)$/);
+      const runId = match?.[1] ?? "";
+      const executionJobId = match?.[2] ?? "";
+      const relativePath = decodeURIComponent(match?.[3] ?? "");
+      const execution = aiExecutionJobs.get(executionJobId);
+      if (!execution || execution.runId !== runId || !execution.reportRootDir) {
+        json(res, 404, { error: "qa_ai_report_asset_not_found" }, corsHeaders);
+        return;
+      }
+      const safeRelative = relativePath.replace(/^\/+/, "");
+      const resolved = path.resolve(execution.reportRootDir, safeRelative);
+      const rootResolved = path.resolve(execution.reportRootDir);
+      if (!resolved.startsWith(rootResolved)) {
+        json(res, 403, { error: "qa_ai_report_asset_forbidden" }, corsHeaders);
+        return;
+      }
+      if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
+        json(res, 404, { error: "qa_ai_report_asset_missing" }, corsHeaders);
+        return;
+      }
+      const content = fs.readFileSync(resolved);
+      binary(res, 200, content, contentTypeForPath(resolved), corsHeaders);
+      return;
+    }
+
+    if (req.method === "GET" && req.url?.match(/^\/plugin\/qa\/runs\/[^/]+\/ai\/executions\/[^/]+\/artifacts\/(trace|video)$/)) {
+      const match = req.url.match(/^\/plugin\/qa\/runs\/([^/]+)\/ai\/executions\/([^/]+)\/artifacts\/(trace|video)$/);
+      const runId = match?.[1] ?? "";
+      const executionJobId = match?.[2] ?? "";
+      const artifactKind = match?.[3] as "trace" | "video";
+      const execution = aiExecutionJobs.get(executionJobId);
+      if (!execution || execution.runId !== runId) {
+        json(res, 404, { error: "qa_ai_execution_job_not_found" }, corsHeaders);
+        return;
+      }
+      if (!execution.videoFilePath || !execution.traceFilePath) {
+        const resolvedProjectDir = path.resolve(process.cwd(), playwrightProjectDir);
+        const resolved = resolveArtifactPathsFromOutput(execution, resolvedProjectDir);
+        if (!execution.videoFilePath && resolved.videoPath) {
+          execution.videoFilePath = resolved.videoPath;
+          execution.videoRef = `/plugin/qa/runs/${encodeURIComponent(runId)}/ai/executions/${encodeURIComponent(executionJobId)}/artifacts/video`;
+        }
+        if (!execution.traceFilePath && resolved.tracePath) {
+          execution.traceFilePath = resolved.tracePath;
+          execution.traceRef = `/plugin/qa/runs/${encodeURIComponent(runId)}/ai/executions/${encodeURIComponent(executionJobId)}/artifacts/trace`;
+        }
+        aiExecutionJobs.set(executionJobId, execution);
+      }
+      const targetPath = artifactKind === "trace" ? execution.traceFilePath : execution.videoFilePath;
+      if (!targetPath || !fs.existsSync(targetPath) || !fs.statSync(targetPath).isFile()) {
+        json(res, 404, { error: "qa_ai_artifact_not_found" }, corsHeaders);
+        return;
+      }
+      if (artifactKind === "video") {
+        serveStaticBinaryFile(req, res, targetPath, "video/webm", {
+          ...(corsHeaders ?? {}),
+          "Content-Disposition": "inline; filename=\"qa-runner-artifact.webm\"",
+        });
+      } else {
+        const content = fs.readFileSync(targetPath);
+        binary(res, 200, content, "application/zip", corsHeaders);
+      }
+      return;
+    }
+
+    if (req.method === "GET" && req.url?.match(/^\/plugin\/qa\/runs\/[^/]+\/ai\/executions\/[^/]+\/artifacts\/video\.mp4$/)) {
+      const match = req.url.match(/^\/plugin\/qa\/runs\/([^/]+)\/ai\/executions\/([^/]+)\/artifacts\/video\.mp4$/);
+      const runId = match?.[1] ?? "";
+      const executionJobId = match?.[2] ?? "";
+      const execution = aiExecutionJobs.get(executionJobId);
+      if (!execution || execution.runId !== runId) {
+        json(res, 404, { error: "qa_ai_execution_job_not_found" }, corsHeaders);
+        return;
+      }
+      if (!execution.videoFilePath || !fs.existsSync(execution.videoFilePath)) {
+        json(res, 404, { error: "qa_ai_video_not_found" }, corsHeaders);
+        return;
+      }
+      if (!ffmpegAvailable) {
+        json(
+          res,
+          404,
+          {
+            error: "qa_video_mp4_unavailable",
+            details: "MP4 transcoding is optional and unavailable on this machine. Use webm playback or trace viewer.",
+          },
+          corsHeaders,
+        );
+        return;
+      }
+      const mp4Path = `${execution.videoFilePath}.qa-runner.mp4`;
+      execution.videoMp4FilePath = mp4Path;
+      const needsTranscode =
+        !fs.existsSync(mp4Path) ||
+        fs.statSync(mp4Path).size <= 0 ||
+        fs.statSync(mp4Path).mtimeMs < fs.statSync(execution.videoFilePath).mtimeMs;
+      if (needsTranscode) {
+        let pending = videoTranscodePromises.get(mp4Path);
+        if (!pending) {
+          pending = transcodeWebmToMp4(execution.videoFilePath, mp4Path, ffmpegBin).finally(() => {
+            videoTranscodePromises.delete(mp4Path);
+          });
+          videoTranscodePromises.set(mp4Path, pending);
+        }
+        try {
+          await pending;
+        } catch (error) {
+          json(res, 500, { error: "qa_video_transcode_failed", details: error instanceof Error ? error.message : String(error) }, corsHeaders);
+          return;
+        }
+      }
+      if (!fs.existsSync(mp4Path) || fs.statSync(mp4Path).size <= 0) {
+        json(res, 500, { error: "qa_video_transcode_empty" }, corsHeaders);
+        return;
+      }
+      serveStaticBinaryFile(req, res, mp4Path, "video/mp4", {
+        ...(corsHeaders ?? {}),
+        "Content-Disposition": "inline; filename=\"qa-runner-artifact.mp4\"",
+      });
+      return;
+    }
+
+    if (req.method === "GET" && req.url?.match(/^\/plugin\/qa\/runs\/[^/]+\/ai\/executions\/[^/]+\/artifacts\/video\/view$/)) {
+      const match = req.url.match(/^\/plugin\/qa\/runs\/([^/]+)\/ai\/executions\/([^/]+)\/artifacts\/video\/view$/);
+      const runId = match?.[1] ?? "";
+      const executionJobId = match?.[2] ?? "";
+      const videoUrl = `/plugin/qa/runs/${encodeURIComponent(runId)}/ai/executions/${encodeURIComponent(executionJobId)}/artifacts/video`;
+      const videoMp4Url = `/plugin/qa/runs/${encodeURIComponent(runId)}/ai/executions/${encodeURIComponent(executionJobId)}/artifacts/video.mp4`;
+      const mp4Enabled = ffmpegAvailable;
+      const html = `<!doctype html>
+<html>
+  <head><meta charset="utf-8"><title>QA Runner Video</title></head>
+  <body style="margin:0;padding:16px;background:#0f172a;color:#e2e8f0;font-family:system-ui,sans-serif">
+    <h3 style="margin:0 0 12px 0">Execution Video</h3>
+    <p id="status" style="margin:0 0 10px 0;font-size:13px;color:#94a3b8">Loading video...</p>
+    <video id="video" controls preload="metadata" style="width:100%;max-width:1100px;background:black;border-radius:8px"></video>
+    <p style="margin-top:10px;font-size:12px;color:#94a3b8">
+      If playback fails, ${mp4Enabled ? `<a href="${videoMp4Url}" style="color:#7dd3fc">open mp4</a> or ` : ""}<a href="${videoUrl}" style="color:#7dd3fc">open raw webm</a>.
+    </p>
+    <script>
+      const status = document.getElementById("status");
+      const video = document.getElementById("video");
+      const videoEndpoint = "${videoUrl}";
+      const videoMp4Endpoint = "${videoMp4Url}";
+      const mp4Enabled = ${mp4Enabled ? "true" : "false"};
+      const canPlayWebm = video.canPlayType('video/webm; codecs="vp8,vorbis"') || video.canPlayType('video/webm');
+      async function loadVideo() {
+        try {
+          let response = null;
+          let usingMp4 = false;
+          if (mp4Enabled) {
+            response = await fetch(videoMp4Endpoint);
+            usingMp4 = response.ok;
+          }
+          if (!response || !response.ok) {
+            response = await fetch(videoEndpoint);
+            usingMp4 = false;
+          }
+          if (!response.ok) {
+            throw new Error("Video fetch failed (" + response.status + ")");
+          }
+          const blob = await response.blob();
+          if (!blob || blob.size === 0) {
+            throw new Error("Video file is empty");
+          }
+          const normalizedBlob = new Blob([blob], { type: "video/webm" });
+          const url = URL.createObjectURL(normalizedBlob);
+          video.src = url;
+          status.textContent = "Video loaded (" + blob.size + " bytes). Source: " + (usingMp4 ? "mp4" : "webm") + ". Browser webm support: " + (canPlayWebm || "none");
+          video.onloadedmetadata = () => {
+            status.textContent = "Video loaded (" + blob.size + " bytes), duration: " + video.duration.toFixed(2) + "s";
+          };
+          video.onerror = () => {
+            status.textContent = "Video decode failed in this browser. Try Chrome/Edge or download raw video.";
+          };
+        } catch (error) {
+          status.textContent = "Video load failed: " + (error && error.message ? error.message : String(error));
+        }
+      }
+      void loadVideo();
+    </script>
+  </body>
+</html>`;
+      text(res, 200, html, "text/html", corsHeaders);
+      return;
+    }
+
+    if (req.method === "GET" && req.url?.match(/^\/plugin\/qa\/runs\/[^/]+\/ai\/executions\/[^/]+\/artifacts\/trace\/view$/)) {
+      const match = req.url.match(/^\/plugin\/qa\/runs\/([^/]+)\/ai\/executions\/([^/]+)\/artifacts\/trace\/view$/);
+      const runId = match?.[1] ?? "";
+      const executionJobId = match?.[2] ?? "";
+      const traceUrl = `/plugin/qa/runs/${encodeURIComponent(runId)}/ai/executions/${encodeURIComponent(executionJobId)}/artifacts/trace`;
+      const html = `<!doctype html>
+<html>
+  <head><meta charset="utf-8"><title>QA Runner Trace</title></head>
+  <body style="margin:0;padding:16px;background:#0f172a;color:#e2e8f0;font-family:system-ui,sans-serif">
+    <h3 style="margin:0 0 12px 0">Execution Trace</h3>
+    <p id="status" style="margin:0 0 10px 0;font-size:13px;color:#94a3b8">Loading trace...</p>
+    <iframe id="trace-frame" style="width:100%;height:80vh;border:0;border-radius:8px;background:#111827" src="https://trace.playwright.dev"></iframe>
+    <script>
+      const iframe = document.getElementById("trace-frame");
+      const status = document.getElementById("status");
+      const traceEndpoint = "${traceUrl}";
+      async function loadTraceIntoViewer() {
+        try {
+          const response = await fetch(traceEndpoint);
+          if (!response.ok) {
+            throw new Error("Trace fetch failed (" + response.status + ")");
+          }
+          const traceBlob = await response.blob();
+          if (!traceBlob || traceBlob.size === 0) {
+            throw new Error("Trace zip is empty");
+          }
+          iframe.contentWindow.postMessage(
+            { method: "load", params: { trace: traceBlob } },
+            "https://trace.playwright.dev",
+          );
+          status.textContent = "Trace loaded.";
+        } catch (error) {
+          status.textContent = "Trace viewer load failed: " + (error && error.message ? error.message : String(error));
+        }
+      }
+      iframe.addEventListener("load", () => { void loadTraceIntoViewer(); }, { once: true });
+    </script>
+  </body>
+</html>`;
+      text(res, 200, html, "text/html", corsHeaders);
+      return;
+    }
+
     if (req.method === "GET" && req.url?.match(/^\/plugin\/qa\/runs\/[^/]+\/ai\/executions\/[^/?#]+$/)) {
       const match = req.url.match(/^\/plugin\/qa\/runs\/([^/]+)\/ai\/executions\/([^/?#]+)$/);
       const runId = match?.[1] ?? "";
@@ -2827,6 +4979,19 @@ export function startDaemonServer(config: ServerConfig): http.Server {
       if (!execution || execution.runId !== runId) {
         json(res, 404, { error: "qa_ai_execution_job_not_found" }, corsHeaders);
         return;
+      }
+      if (!execution.videoFilePath || !execution.traceFilePath) {
+        const resolvedProjectDir = path.resolve(process.cwd(), playwrightProjectDir);
+        const resolved = resolveArtifactPathsFromOutput(execution, resolvedProjectDir);
+        if (!execution.videoFilePath && resolved.videoPath) {
+          execution.videoFilePath = resolved.videoPath;
+          execution.videoRef = `/plugin/qa/runs/${encodeURIComponent(runId)}/ai/executions/${encodeURIComponent(executionJobId)}/artifacts/video`;
+        }
+        if (!execution.traceFilePath && resolved.tracePath) {
+          execution.traceFilePath = resolved.tracePath;
+          execution.traceRef = `/plugin/qa/runs/${encodeURIComponent(runId)}/ai/executions/${encodeURIComponent(executionJobId)}/artifacts/trace`;
+        }
+        aiExecutionJobs.set(executionJobId, execution);
       }
       json(res, 200, { data: execution }, corsHeaders);
       return;
@@ -2854,6 +5019,18 @@ export function startDaemonServer(config: ServerConfig): http.Server {
           runId,
           status: body.status ?? "completed",
           playwrightCommand: body.playwrightCommand ?? "npm --prefix e2e/ui run test",
+          progressPercent: body.status === "completed" || body.status === "failed" || body.status === "cancelled" ? 100 : 0,
+          totalTests: null,
+          completedTests: 0,
+          currentTest: null,
+          lastActivity: "Imported execution metadata",
+          lastActivityAt: now,
+          processAlive: false,
+          outputLines: [],
+          reportRootDir: null,
+          traceFilePath: null,
+          videoFilePath: null,
+          videoMp4FilePath: null,
           reportRef: body.reportRef ?? null,
           traceRef: body.traceRef ?? null,
           videoRef: body.videoRef ?? null,

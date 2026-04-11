@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { SectionHeader, SurfaceCard } from "../components/Infographic";
 import { Skeleton } from "../components/Skeleton";
+import { API_URL } from "../config/runtime";
 import {
   addQaCaseEvidence,
   addCaseComment as addCaseCommentApi,
@@ -26,6 +27,7 @@ import {
   fetchQaGenerationHistory,
   fetchQaGenerationJob,
   fetchQaGenerationStatus,
+  fetchQaAutomationExecutionStatus,
   fetchQaFlakinessReport,
   fetchQaWorkspaces,
   fetchQaMarkdownValidation,
@@ -46,6 +48,7 @@ import {
   retestQaFixProposal,
   restoreQaArchivedSuite,
   runQaAutomation,
+  startQaAutomationExecution,
   saveQaWorkspace,
   syncQaWorkspace,
   triggerQaRunReportWebhook,
@@ -70,6 +73,7 @@ import type {
   QaRunDetail,
   QaRunCollaborator,
   QaRuntimeStatus,
+  QaAutomationExecutionStatus,
   QaSuite,
   QaTestType,
   QaTestTypeId,
@@ -87,6 +91,18 @@ const statusPillClass = (status: QaCaseStatus): string => {
   return "bg-surface-200 text-ink-700 dark:bg-slate-800 dark:text-slate-300";
 };
 
+const proposalStatusClass = (status: "pending" | "applied" | "failed" | undefined): string => {
+  if (status === "applied") return "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300";
+  if (status === "failed") return "bg-rose-100 text-rose-800 dark:bg-rose-950/40 dark:text-rose-300";
+  return "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300";
+};
+
+const proposalRetestClass = (status: "not_run" | "passed" | "failed" | undefined): string => {
+  if (status === "passed") return "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300";
+  if (status === "failed") return "bg-rose-100 text-rose-800 dark:bg-rose-950/40 dark:text-rose-300";
+  return "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300";
+};
+
 const isEnabled = (value: unknown, fallback: boolean): boolean => {
   if (typeof value !== "string") {
     return fallback;
@@ -102,6 +118,11 @@ const formatDurationMinutes = (ms: number | undefined): string => {
   if (!ms) return "0m";
   const minutes = Math.round(ms / (1000 * 60));
   return `${minutes}m`;
+};
+
+const clampProgress = (value: number): number => {
+  if (Number.isNaN(value)) return 0;
+  return Math.max(0, Math.min(100, value));
 };
 
 const parseMarkdownSuite = (content: string) => {
@@ -325,8 +346,9 @@ type ManualTestingPageContentProps = {
   hideModeSwitch: boolean;
 };
 
-type CaseFilterMode = "incomplete" | "all" | "completed";
+type CaseFilterMode = "all" | "incomplete" | "completed";
 type QaDestructiveAction = "archive" | "delete";
+type AiViewTab = "execute" | "generate" | "history";
 
 const ManualTestingPageContent = ({
   aiModeEnabled,
@@ -345,7 +367,7 @@ const ManualTestingPageContent = ({
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [caseFilterMode, setCaseFilterMode] = useState<CaseFilterMode>("incomplete");
+  const [caseFilterMode, setCaseFilterMode] = useState<CaseFilterMode>("all");
   const [autoLoadedSuiteId, setAutoLoadedSuiteId] = useState<string>("");
   const [archivedSuites, setArchivedSuites] = useState<
     Array<{ fileName: string; relativePath: string; suiteName: string; feature: string; date: string }>
@@ -376,7 +398,7 @@ const ManualTestingPageContent = ({
   const [generatePrompt, setGeneratePrompt] = useState("");
   const [generatePlugins, setGeneratePlugins] = useState("");
   const [generateRoutes, setGenerateRoutes] = useState("");
-  const [existingTestDir, setExistingTestDir] = useState("e2e/ui/tests");
+  const [existingTestDir, setExistingTestDir] = useState("e2e/generated");
   const [existingTags, setExistingTags] = useState("");
   const [generationJob, setGenerationJob] = useState<QaGenerationJob | null>(null);
   const [generationHistory, setGenerationHistory] = useState<QaGenerationJob[]>([]);
@@ -393,8 +415,27 @@ const ManualTestingPageContent = ({
   const [manualAiPolling, setManualAiPolling] = useState(false);
   const [runtimeStatus, setRuntimeStatus] = useState<QaRuntimeStatus | null>(null);
   const [runtimeLoading, setRuntimeLoading] = useState(false);
-  const [runtimeAutoRefresh, setRuntimeAutoRefresh] = useState(false);
+  const [runtimeRefreshIntervalMs, setRuntimeRefreshIntervalMs] = useState(0);
   const [showAdvancedActions, setShowAdvancedActions] = useState(false);
+  const [automationRunning, setAutomationRunning] = useState(false);
+  const [automationExecutionStatus, setAutomationExecutionStatus] = useState<QaAutomationExecutionStatus | null>(null);
+  const [healingActivityLog, setHealingActivityLog] = useState<string[]>([]);
+  const [healingProgressPercent, setHealingProgressPercent] = useState(0);
+  const [healingProgressLabel, setHealingProgressLabel] = useState("Idle");
+  const [healingRunSnapshot, setHealingRunSnapshot] = useState<{
+    startedAt: string;
+    completedAt?: string;
+    planned: number;
+    applied: number;
+    passedRetests: number;
+    failedRetests: number;
+    filesChanged: string[];
+  } | null>(null);
+  const [autoHealOnFailure, setAutoHealOnFailure] = useState(false);
+  const [autoHealTriggeredExecutionId, setAutoHealTriggeredExecutionId] = useState<string | null>(null);
+  const [aiAssistNote, setAiAssistNote] = useState("");
+  const [showArtifactModal, setShowArtifactModal] = useState(false);
+  const [aiViewTab, setAiViewTab] = useState<AiViewTab>("execute");
   const [flakinessReport, setFlakinessReport] = useState<QaFlakinessReport | null>(null);
   const [flakinessLoading, setFlakinessLoading] = useState(false);
   const [destructiveModalAction, setDestructiveModalAction] = useState<QaDestructiveAction | null>(null);
@@ -480,6 +521,36 @@ const ManualTestingPageContent = ({
   const showAiSection = activeSection === "ai";
   const showTeamSection = activeSection === "team";
   const showSettingsSection = activeSection === "settings";
+
+  const aiRunHistory = useMemo(
+    () => runHistory.filter((run) => run.mode === "ai"),
+    [runHistory],
+  );
+
+  const healingActivitySummary = useMemo(() => {
+    const proposals = generationJob?.result?.intelligentFixProposals ?? [];
+    if (proposals.length === 0) {
+      return null;
+    }
+    const applied = proposals.filter((item) => item.status === "applied");
+    const failed = proposals.filter((item) => item.status === "failed");
+    const retestPassed = proposals.filter((item) => item.retestStatus === "passed");
+    const retestFailed = proposals.filter((item) => item.retestStatus === "failed");
+    const affectedFiles = Array.from(new Set(applied.map((item) => item.filePath))).sort();
+    return {
+      total: proposals.length,
+      appliedCount: applied.length,
+      failedCount: failed.length,
+      retestPassedCount: retestPassed.length,
+      retestFailedCount: retestFailed.length,
+      affectedFiles,
+      latestAppliedAt: applied
+        .map((item) => item.appliedAt || "")
+        .filter(Boolean)
+        .sort((a, b) => (a < b ? 1 : -1))[0] ?? null,
+      recentApplied: applied.slice(0, 5),
+    };
+  }, [generationJob?.result?.intelligentFixProposals]);
 
   const collaborationPanel = (
     <div className="rounded-[28px] border border-surface-200 bg-white/95 p-5 shadow-[0_30px_70px_rgba(15,23,42,0.12)] dark:border-slate-800/60 dark:bg-slate-950/90">
@@ -629,9 +700,125 @@ const ManualTestingPageContent = ({
   }, [suites, searchTerm]);
 
   const playwrightUiBridgeEnabled = runtimeStatus?.playwrightUiEnabled ?? true;
+  const aiExecutionRunning = executeResult?.status === "queued" || executeResult?.status === "running";
+  const executeAiDisabled = busy || !playwrightUiBridgeEnabled || aiExecutionRunning || aiPolling;
+  const aiExecutionProgress = useMemo(() => {
+    if (!executeResult) {
+      return 0;
+    }
+    if (typeof executeResult.progressPercent === "number") {
+      return clampProgress(executeResult.progressPercent);
+    }
+    if (executeResult.status === "queued") {
+      return 8;
+    }
+    if (executeResult.status === "completed" || executeResult.status === "failed" || executeResult.status === "cancelled") {
+      return 100;
+    }
+    const artifactsReady = [
+      executeResult.artifacts.reportRef,
+      executeResult.artifacts.traceRef,
+      executeResult.artifacts.videoRef,
+    ].filter(Boolean).length;
+    const startedAtMs = executeResult.startedAt ? new Date(executeResult.startedAt).getTime() : Date.now();
+    const elapsedMs = Math.max(0, Date.now() - startedAtMs);
+    const elapsedProgress = Math.min(elapsedMs / (8 * 60 * 1000), 1) * 70;
+    const artifactProgress = artifactsReady * 5;
+    return clampProgress(20 + elapsedProgress + artifactProgress);
+  }, [clockMs, executeResult]);
+  const aiExecutionProgressLabel = useMemo(() => {
+    if (!executeResult) {
+      return "";
+    }
+    if (executeResult.status === "queued") {
+      return "Queued: waiting for worker";
+    }
+    if (executeResult.status === "running") {
+      const elapsedSeconds = executeResult.startedAt
+        ? Math.max(0, Math.floor((clockMs - new Date(executeResult.startedAt).getTime()) / 1000))
+        : 0;
+      return `Running: ${elapsedSeconds}s elapsed`;
+    }
+    if (executeResult.status === "completed") {
+      return "Completed";
+    }
+    if (executeResult.status === "failed") {
+      return "Failed";
+    }
+    return "Cancelled";
+  }, [clockMs, executeResult]);
+  const aiExecutionDetailLabel = useMemo(() => {
+    if (!executeResult) {
+      return "";
+    }
+    const completed = executeResult.completedTests ?? 0;
+    const total = executeResult.totalTests ?? null;
+    if (executeResult.currentTest) {
+      if (typeof total === "number" && total > 0) {
+        return `${completed}/${total} tests complete · Current: ${executeResult.currentTest}`;
+      }
+      return `Current: ${executeResult.currentTest}`;
+    }
+    if (typeof total === "number" && total > 0) {
+      return `${completed}/${total} tests complete`;
+    }
+    if (executeResult.lastActivity) {
+      return executeResult.lastActivity;
+    }
+    return "";
+  }, [executeResult]);
+  const aiLastActivitySeconds = useMemo(() => {
+    if (!executeResult?.lastActivityAt) {
+      return null;
+    }
+    return Math.max(0, Math.floor((clockMs - new Date(executeResult.lastActivityAt).getTime()) / 1000));
+  }, [clockMs, executeResult?.lastActivityAt]);
+  const aiExecutionStalled = useMemo(() => {
+    if (!executeResult || executeResult.status !== "running") {
+      return false;
+    }
+    if (executeResult.stalled) {
+      return true;
+    }
+    return typeof aiLastActivitySeconds === "number" && aiLastActivitySeconds > 90;
+  }, [aiLastActivitySeconds, executeResult]);
+  const artifactEntries = useMemo(
+    () =>
+      executeResult
+        ? [
+            { key: "report", label: "Report", ref: executeResult.artifacts.reportRef },
+            { key: "trace", label: "Trace", ref: executeResult.artifacts.traceRef },
+            { key: "video", label: "Video", ref: executeResult.artifacts.videoRef },
+          ]
+        : [],
+    [executeResult],
+  );
+  const resolveArtifactUrl = (ref: string): string => {
+    if (!ref) return "";
+    if (ref.startsWith("http://") || ref.startsWith("https://")) {
+      return ref;
+    }
+    if (ref.startsWith("/")) {
+      return `${API_URL}${ref}`;
+    }
+    return ref;
+  };
   const selectedSuite = useMemo(
     () => suites.find((suite) => suite.id === selectedSuiteId) ?? null,
     [suites, selectedSuiteId],
+  );
+  const healingProposals = generationJob?.result?.intelligentFixProposals ?? [];
+  const healingChangedFiles = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          healingProposals
+            .filter((proposal) => proposal.status === "applied")
+            .map((proposal) => proposal.filePath)
+            .filter(Boolean),
+        ),
+      ),
+    [healingProposals],
   );
 
   const groupedValidationIssues = useMemo(() => {
@@ -811,9 +998,17 @@ const ManualTestingPageContent = ({
       if (!raw) {
         return;
       }
-      const parsed = JSON.parse(raw) as { executeResult?: QaAiExecuteResult };
+      const parsed = JSON.parse(raw) as { executeResult?: QaAiExecuteResult; persistedAt?: string };
       if (!parsed.executeResult) {
         return;
+      }
+      if (parsed.persistedAt) {
+        const ageMs = Date.now() - new Date(parsed.persistedAt).getTime();
+        // Drop stale execution pointers after daemon restarts / long browser idle.
+        if (Number.isFinite(ageMs) && ageMs > 60 * 60 * 1000) {
+          localStorage.removeItem(QA_ACTIVE_EXECUTION_STORAGE_KEY);
+          return;
+        }
       }
       setExecuteResult(parsed.executeResult);
       if (
@@ -828,15 +1023,15 @@ const ManualTestingPageContent = ({
   }, []);
 
   useEffect(() => {
-    if (mode !== "ai" || !runtimeAutoRefresh) {
+    if (mode !== "ai" || runtimeRefreshIntervalMs <= 0) {
       return;
     }
     const timer = setInterval(() => {
       void loadRuntimeStatus();
       void loadFlakinessReport();
-    }, 30000);
+    }, runtimeRefreshIntervalMs);
     return () => clearInterval(timer);
-  }, [mode, runtimeAutoRefresh]);
+  }, [mode, runtimeRefreshIntervalMs]);
 
   useEffect(() => {
     if (!executeResult) {
@@ -1012,14 +1207,6 @@ const ManualTestingPageContent = ({
     if (!aiPolling || !executeResult) {
       return;
     }
-    if (
-      executeResult.status === "completed" ||
-      executeResult.status === "failed" ||
-      executeResult.status === "cancelled"
-    ) {
-      setAiPolling(false);
-      return;
-    }
 
     let cancelled = false;
     let inFlight = false;
@@ -1044,6 +1231,15 @@ const ManualTestingPageContent = ({
           completedAt: status.completedAt,
           playwrightCommand: status.playwrightCommand,
           playwrightUiUrl: status.playwrightUiUrl ?? undefined,
+          progressPercent: status.progressPercent,
+          totalTests: status.totalTests ?? null,
+          completedTests: status.completedTests ?? 0,
+          currentTest: status.currentTest ?? null,
+          lastActivity: status.lastActivity ?? null,
+          lastActivityAt: status.lastActivityAt ?? null,
+          processAlive: status.processAlive ?? false,
+          stalled: status.stalled ?? false,
+          outputLines: Array.isArray(status.outputLines) ? status.outputLines : [],
           artifacts: {
             reportRef: status.reportRef ?? "",
             traceRef: status.traceRef ?? "",
@@ -1055,13 +1251,103 @@ const ManualTestingPageContent = ({
         setAiPollError("");
         if (next.status === "completed" || next.status === "failed" || next.status === "cancelled") {
           setAiPolling(false);
+          if (next.status === "failed" && next.error) {
+            setError(next.error);
+          }
           await reloadRunDetail(next.runId);
+          if (
+            next.status === "failed" &&
+            autoHealOnFailure &&
+            autoHealTriggeredExecutionId !== next.executionJobId
+          ) {
+            setAutoHealTriggeredExecutionId(next.executionJobId);
+            setAutomationRunning(true);
+            try {
+              let healJob = generationJob;
+              if (!healJob) {
+                healJob = await loadQaExistingTests({
+                  testTypes: getNativeTestTypes(),
+                  testDir: existingTestDir.trim() || undefined,
+                  tags: existingTags
+                    .split(",")
+                    .map((item) => item.trim())
+                    .filter(Boolean),
+                });
+              }
+              const existingProposals = healJob.result?.intelligentFixProposals ?? [];
+              const eligibleBefore = existingProposals.filter(
+                (proposal) => proposal.status !== "applied" && proposal.changeType !== "app_plus_test",
+              );
+              if (eligibleBefore.length === 0) {
+                const reviewed =
+                  healJob.result?.intelligentReview
+                    ? healJob
+                    : await runQaIntelligentReview({
+                        generationJobId: healJob.id,
+                        maxSuggestions: 5,
+                      });
+                healJob = await generateQaFixProposals({
+                  generationJobId: reviewed.id,
+                  maxProposals: 12,
+                });
+              }
+              const updated = await runQaAutomation({
+                generationJobId: healJob.id,
+                strategy: "continuous_fix",
+                maxIterations: 25,
+                sourceExecutionJobId: next.executionJobId,
+              });
+              setGenerationJob(updated);
+              const applied = updated.result?.automation?.appliedCount ?? 0;
+              const remaining = updated.result?.automation?.remainingProposals ?? 0;
+              const recovered =
+                updated.result?.automation?.status === "fixed" &&
+                (updated.result?.automation?.failedRetests ?? 0) === 0;
+              if (recovered) {
+                setExecuteResult((previous) =>
+                  previous
+                    ? {
+                        ...previous,
+                        status: "completed",
+                        error: undefined,
+                        currentTest: null,
+                        completedAt: new Date().toISOString(),
+                        lastActivity: "Recovered by self-heal + retest",
+                        completedTests:
+                          typeof previous.totalTests === "number" && previous.totalTests > 0
+                            ? previous.totalTests
+                            : previous.completedTests,
+                      }
+                    : previous,
+                );
+                setError("");
+              }
+              setAiAssistNote(
+                recovered
+                  ? `Auto-heal recovered the failed run: applied ${applied}, remaining ${remaining}.`
+                  : `Auto-heal cycle completed: applied ${applied}, remaining ${remaining}.`,
+              );
+            } catch (automationError) {
+              setError(automationError instanceof Error ? automationError.message : "Auto-heal failed");
+            } finally {
+              setAutomationRunning(false);
+            }
+          }
         }
       } catch (pollError) {
         if (!cancelled) {
           const message = pollError instanceof Error ? pollError.message : "Failed to refresh AI run status";
+          const normalized = message.toLowerCase();
+          if (normalized.includes("qa_ai_execution_job_not_found")) {
+            setAiPolling(false);
+            setExecuteResult(null);
+            localStorage.removeItem(QA_ACTIVE_EXECUTION_STORAGE_KEY);
+            setAiPollError("");
+            setError("Previous execution no longer exists in daemon memory (likely daemon restart). Start a new AI run.");
+            return;
+          }
           setAiPollError(
-            message.toLowerCase().includes("unauthorized")
+            normalized.includes("unauthorized")
               ? "Session expired while polling AI run status. Please sign in again, then reopen this run from history."
               : message,
           );
@@ -1072,6 +1358,15 @@ const ManualTestingPageContent = ({
     };
 
     void poll();
+    if (
+      executeResult.status === "completed" ||
+      executeResult.status === "failed" ||
+      executeResult.status === "cancelled"
+    ) {
+      return () => {
+        cancelled = true;
+      };
+    }
     const interval = setInterval(() => {
       void poll();
     }, 2000);
@@ -1079,7 +1374,7 @@ const ManualTestingPageContent = ({
       cancelled = true;
       clearInterval(interval);
     };
-  }, [aiPolling, executeResult]);
+  }, [aiPolling, autoHealOnFailure, autoHealTriggeredExecutionId, executeResult, generationJob]);
 
   useEffect(() => {
     if (!manualAiPolling || !manualAiExecution) {
@@ -1667,10 +1962,44 @@ const ManualTestingPageContent = ({
       const updated = await generateQaFixProposals({
         generationJobId: generationJob.id,
         maxProposals: 12,
+        sourceExecutionJobId: executeResult?.executionJobId,
       });
       setGenerationJob(updated);
     } catch (proposalError) {
       setError(proposalError instanceof Error ? proposalError.message : "Failed to generate fix proposals");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const suggestSelfHealFixesAction = async (): Promise<void> => {
+    if (!generationJob) {
+      setError("Load or execute tests first so AI can propose fixes.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    setAiAssistNote("");
+    try {
+      const reviewed =
+        generationJob.result?.intelligentReview
+          ? generationJob
+          : await runQaIntelligentReview({
+              generationJobId: generationJob.id,
+              maxSuggestions: 5,
+            });
+      const updated = await generateQaFixProposals({
+        generationJobId: reviewed.id,
+        maxProposals: 12,
+        sourceExecutionJobId: executeResult?.executionJobId,
+      });
+      setGenerationJob(updated);
+      setAiViewTab("generate");
+      setShowAdvancedActions(true);
+      const count = updated.result?.intelligentFixProposals?.length ?? 0;
+      setAiAssistNote(`AI proposed ${count} self-heal fix${count === 1 ? "" : "es"}. Review in Generate tab.`);
+    } catch (assistError) {
+      setError(assistError instanceof Error ? assistError.message : "Failed to generate self-heal suggestions");
     } finally {
       setBusy(false);
     }
@@ -1691,6 +2020,72 @@ const ManualTestingPageContent = ({
       setGenerationJob(updated);
     } catch (applyError) {
       setError(applyError instanceof Error ? applyError.message : "Failed to apply fix proposal");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const applyAllFixProposalsAction = async (): Promise<void> => {
+    if (!generationJob) {
+      setError("Generate fix proposals first.");
+      return;
+    }
+    const proposals = generationJob.result?.intelligentFixProposals ?? [];
+    const eligible = proposals.filter(
+      (proposal) => proposal.status !== "applied" && proposal.changeType !== "app_plus_test",
+    );
+    if (eligible.length === 0) {
+      setAiAssistNote("No eligible proposals to apply.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    setAiAssistNote("");
+    try {
+      let latest = generationJob;
+      for (const proposal of eligible) {
+        latest = await applyQaFixProposal({
+          generationJobId: latest.id,
+          proposalId: proposal.id,
+        });
+      }
+      setGenerationJob(latest);
+      setAiAssistNote(`Applied ${eligible.length} eligible proposal${eligible.length === 1 ? "" : "s"}.`);
+    } catch (applyError) {
+      setError(applyError instanceof Error ? applyError.message : "Failed to apply all proposals");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const retestAllAppliedProposalsAction = async (): Promise<void> => {
+    if (!generationJob) {
+      setError("Apply proposals first.");
+      return;
+    }
+    const proposals = generationJob.result?.intelligentFixProposals ?? [];
+    const eligible = proposals.filter(
+      (proposal) => proposal.status === "applied" && proposal.changeType !== "app_plus_test",
+    );
+    if (eligible.length === 0) {
+      setAiAssistNote("No applied proposals to retest.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    setAiAssistNote("");
+    try {
+      let latest = generationJob;
+      for (const proposal of eligible) {
+        latest = await retestQaFixProposal({
+          generationJobId: latest.id,
+          proposalId: proposal.id,
+        });
+      }
+      setGenerationJob(latest);
+      setAiAssistNote(`Retested ${eligible.length} applied proposal${eligible.length === 1 ? "" : "s"}.`);
+    } catch (retestError) {
+      setError(retestError instanceof Error ? retestError.message : "Failed to retest all applied proposals");
     } finally {
       setBusy(false);
     }
@@ -1717,22 +2112,189 @@ const ManualTestingPageContent = ({
   };
 
   const runAutomationAction = async (strategy: "continuous_fix" | "alert_only"): Promise<void> => {
-    if (!generationJob) {
-      setError("Load existing tests before running automation.");
-      return;
-    }
+    let effectiveJob = generationJob;
     setBusy(true);
+    setAutomationRunning(true);
+    setAutomationExecutionStatus(null);
     setError("");
+    setHealingActivityLog([]);
+    setHealingProgressPercent(5);
+    setHealingProgressLabel("Initializing healing run");
+    setAiAssistNote(
+      strategy === "continuous_fix"
+        ? "Starting self-heal + retest cycle..."
+        : "Starting alert-only analysis...",
+    );
     try {
-      const updated = await runQaAutomation({
-        generationJobId: generationJob.id,
+      if (!effectiveJob) {
+        setHealingProgressPercent(12);
+        setHealingProgressLabel("Loading suite context");
+        const loaded = await loadQaExistingTests({
+          testTypes: getNativeTestTypes(),
+          testDir: existingTestDir.trim() || undefined,
+          tags: existingTags
+            .split(",")
+            .map((item) => item.trim())
+            .filter(Boolean),
+        });
+        effectiveJob = loaded;
+        setGenerationJob(loaded);
+        setGenerationHistory((prev) => [loaded, ...prev.filter((item) => item.id !== loaded.id)].slice(0, 8));
+      }
+      if (!effectiveJob) {
+        setError("Unable to load test context for automation.");
+        return;
+      }
+      const beforeProposals = new Map(
+        (effectiveJob.result?.intelligentFixProposals ?? []).map((proposal) => [proposal.id, proposal]),
+      );
+      const planned = (effectiveJob.result?.intelligentFixProposals ?? []).filter(
+        (proposal) => proposal.status !== "applied" && proposal.changeType !== "app_plus_test",
+      ).length;
+      const startedAt = new Date().toISOString();
+      setHealingProgressPercent(30);
+      setHealingProgressLabel(
+        planned > 0 ? `Analyzing ${planned} proposal(s)` : "No pending proposals, checking automation state",
+      );
+      setHealingRunSnapshot({
+        startedAt,
+        planned,
+        applied: 0,
+        passedRetests: 0,
+        failedRetests: 0,
+        filesChanged: [],
+      });
+      setHealingActivityLog((prev) => [
+        ...prev,
+        `[${new Date(startedAt).toLocaleTimeString()}] Started ${strategy} automation. Planned proposals: ${planned}.`,
+      ]);
+      const execution = await startQaAutomationExecution({
+        generationJobId: effectiveJob.id,
         strategy,
         maxIterations: strategy === "continuous_fix" ? 25 : undefined,
       });
+      setAutomationExecutionStatus(execution);
+      setHealingProgressPercent(Math.max(30, execution.progressPercent));
+      setHealingProgressLabel(execution.currentStep ?? "Applying fixes and retesting");
+
+      let currentExecution = execution;
+      while (currentExecution.status === "queued" || currentExecution.status === "running") {
+        await new Promise((resolve) => setTimeout(resolve, 900));
+        currentExecution = await fetchQaAutomationExecutionStatus(currentExecution.id);
+        setAutomationExecutionStatus(currentExecution);
+        setHealingProgressPercent(Math.max(30, currentExecution.progressPercent));
+        setHealingProgressLabel(currentExecution.currentStep ?? "Applying fixes and retesting");
+      }
+
+      const updated = await fetchQaGenerationJob(effectiveJob.id);
       setGenerationJob(updated);
+      const automation = updated.result?.automation;
+      const afterProposals = updated.result?.intelligentFixProposals ?? [];
+      const changedProposals = afterProposals.filter((proposal) => {
+        const before = beforeProposals.get(proposal.id);
+        if (!before) {
+          return true;
+        }
+        return (
+          before.status !== proposal.status ||
+          before.retestStatus !== proposal.retestStatus ||
+          before.appliedAt !== proposal.appliedAt ||
+          before.retestAt !== proposal.retestAt ||
+          before.applyError !== proposal.applyError ||
+          before.retestError !== proposal.retestError
+        );
+      });
+      const completedAt = new Date().toISOString();
+      const filesChanged = Array.from(
+        new Set(
+          (updated.result?.intelligentFixProposals ?? [])
+            .filter((proposal) => proposal.status === "applied")
+            .map((proposal) => proposal.filePath)
+            .filter(Boolean),
+        ),
+      );
+      setHealingRunSnapshot((prev) => ({
+        startedAt: prev?.startedAt ?? startedAt,
+        completedAt,
+        planned:
+          (currentExecution?.totalProposals && currentExecution.totalProposals > 0
+            ? currentExecution.totalProposals
+            : prev?.planned) ?? planned,
+        applied: automation?.appliedCount ?? 0,
+        passedRetests: automation?.passedRetests ?? 0,
+        failedRetests: automation?.failedRetests ?? 0,
+        filesChanged,
+      }));
+      setHealingActivityLog((prev) => [
+        ...prev,
+        `[${new Date(completedAt).toLocaleTimeString()}] Completed with status ${
+          automation?.status ?? "unknown"
+        }. Applied ${automation?.appliedCount ?? 0}, passed retests ${automation?.passedRetests ?? 0}, failed retests ${
+          automation?.failedRetests ?? 0
+        }.`,
+        ...changedProposals.map((proposal) => {
+          const parts: string[] = [];
+          if (proposal.status === "applied") {
+            parts.push("healed");
+          } else if (proposal.status === "failed") {
+            parts.push("heal-failed");
+          }
+          if (proposal.retestStatus === "passed") {
+            parts.push("retest-passed");
+          } else if (proposal.retestStatus === "failed") {
+            parts.push("retest-failed");
+          } else if (proposal.retestStatus === "not_run") {
+            parts.push("retest-skipped");
+          }
+          const state = parts.length > 0 ? parts.join(", ") : "no-state-change";
+          const testedTarget = proposal.retestCommand ? ` · tested=${proposal.retestCommand}` : "";
+          const errorSummary = proposal.applyError || proposal.retestError;
+          const errorText = errorSummary ? ` · error=${errorSummary}` : "";
+          return `[${new Date(completedAt).toLocaleTimeString()}] ${proposal.title} (${proposal.filePath}) → ${state}${testedTarget}${errorText}`;
+        }),
+      ]);
+      if (automation) {
+        setHealingProgressPercent(100);
+        setHealingProgressLabel(
+          `Completed (${automation.status}) · applied ${automation.appliedCount} · retest pass ${automation.passedRetests} · retest fail ${automation.failedRetests}`,
+        );
+        const recovered = automation.status === "fixed" && automation.failedRetests === 0;
+        if (recovered) {
+          setExecuteResult((previous) =>
+            previous
+              ? {
+                  ...previous,
+                  status: "completed",
+                  error: undefined,
+                  currentTest: null,
+                  completedAt,
+                  lastActivity: "Recovered by self-heal + retest",
+                  completedTests:
+                    typeof previous.totalTests === "number" && previous.totalTests > 0
+                      ? previous.totalTests
+                      : previous.completedTests,
+                }
+              : previous,
+          );
+          setError("");
+        }
+        setAiAssistNote(
+          recovered
+            ? `Healing recovered the failed run. Applied ${automation.appliedCount}, passed retests ${automation.passedRetests}.`
+            : `Healing cycle finished: ${automation.status}. Applied ${automation.appliedCount}, passed retests ${automation.passedRetests}, remaining ${automation.remainingProposals}.`,
+        );
+      } else {
+        setHealingProgressPercent(100);
+        setHealingProgressLabel("Completed");
+        setAiAssistNote("Healing cycle finished.");
+      }
     } catch (automationError) {
+      setHealingProgressLabel("Failed");
       setError(automationError instanceof Error ? automationError.message : "Failed to run automation strategy");
+      setAiAssistNote("");
     } finally {
+      setAutomationExecutionStatus((prev) => (prev?.status === "completed" ? prev : null));
+      setAutomationRunning(false);
       setBusy(false);
     }
   };
@@ -1800,39 +2362,63 @@ const ManualTestingPageContent = ({
   };
 
   const executeAiRunAction = async (): Promise<void> => {
-    if (!generationJob) {
-      setError("Load or generate tests before executing.");
+    if (aiExecutionRunning || aiPolling) {
+      setError("AI run already in progress. Wait for completion or cancel it.");
       return;
     }
     setBusy(true);
     setError("");
+    setAiAssistNote("");
     try {
-      let effectivePrepare = prepareResult;
-      if (!effectivePrepare) {
-        if (!selectedSuiteId) {
-          setError("Select a suite for AI execution.");
-          return;
-        }
-        let runId = runDetail?.run.id ?? "";
-        if (!runId) {
-          const run = await createQaRun(selectedSuiteId, "ai");
-          runId = run.id;
-          await reloadRunDetail(runId);
-        }
-        effectivePrepare = await prepareQaAiRun({
-          runId,
-          generationJobId: generationJob.id,
+      let effectiveGenerationJob = generationJob;
+      if (!effectiveGenerationJob) {
+        const loaded = await loadQaExistingTests({
           testTypes: getNativeTestTypes(),
+          testDir: existingTestDir.trim() || undefined,
+          tags: existingTags
+            .split(",")
+            .map((item) => item.trim())
+            .filter(Boolean),
         });
-        setPrepareResult(effectivePrepare);
+        effectiveGenerationJob = loaded;
+        setGenerationJob(loaded);
+        setGenerationHistory((prev) => [loaded, ...prev.filter((item) => item.id !== loaded.id)].slice(0, 8));
+      }
+      if (!effectiveGenerationJob) {
+        setError("Load or generate tests before executing.");
+        return;
       }
 
+      if (!selectedSuiteId) {
+        setError("Select a suite for AI execution.");
+        return;
+      }
+      let runId = runDetail?.run.id ?? "";
+      if (!runId) {
+        const run = await createQaRun(selectedSuiteId, "ai");
+        runId = run.id;
+        await reloadRunDetail(runId);
+      }
+      // Always prepare a fresh execution job so repeated Execute clicks create new runs.
+      const prepared = await prepareQaAiRun({
+        runId,
+        generationJobId: effectiveGenerationJob.id,
+        testTypes: getNativeTestTypes(),
+      });
+      setPrepareResult(prepared);
+
       const started = await executeQaAiRun({
-        runId: effectivePrepare.runId,
-        executionJobId: effectivePrepare.executionJobId,
-        runMode: "ui",
+        runId: prepared.runId,
+        executionJobId: prepared.executionJobId,
+        runMode:
+          runtimeStatus?.executionMode === "ui" ||
+          runtimeStatus?.executionMode === "shell" ||
+          runtimeStatus?.executionMode === "stub"
+            ? runtimeStatus.executionMode
+            : "shell",
       });
       setExecuteResult(started);
+      setAutoHealTriggeredExecutionId(null);
       if (started.playwrightUiUrl) {
         window.open(started.playwrightUiUrl, "_blank", "noopener,noreferrer");
       }
@@ -1851,6 +2437,7 @@ const ManualTestingPageContent = ({
       setError("Start a run before executing manual AI checklist.");
       return;
     }
+    setCaseFilterMode("all");
     setBusy(true);
     setError("");
     try {
@@ -2478,181 +3065,148 @@ const ManualTestingPageContent = ({
             </p>
           ) : (
             <>
-              <div className="rounded-lg border border-surface-300 bg-surface-50 p-3 text-sm text-ink-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="font-semibold">What Will Run</p>
-                  <div className="flex items-center gap-2">
-                    <label className="inline-flex items-center gap-1 text-xs text-ink-600 dark:text-slate-300">
-                      <input
-                        type="checkbox"
-                        checked={runtimeAutoRefresh}
-                        onChange={(event) => setRuntimeAutoRefresh(event.target.checked)}
-                        className="h-3.5 w-3.5 rounded border-surface-300 text-brand-500 focus:ring-brand-500 dark:border-slate-700"
-                      />
-                      Auto-refresh (30s)
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        void loadRuntimeStatus();
-                        void loadFlakinessReport();
-                      }}
-                      disabled={runtimeLoading}
-                      className="rounded-lg border border-surface-300 px-2 py-1 text-xs font-semibold text-ink-700 disabled:opacity-60 dark:border-slate-700 dark:text-slate-200"
-                    >
-                      {runtimeLoading ? "Refreshing..." : "Refresh Runtime"}
-                    </button>
-                  </div>
-                </div>
-                <p className="mt-1">
-                  AI execution currently runs the full Playwright suite (no tag filtering). Selected profiles are
-                  used for planning context only. Current backend mode:{" "}
-                  <span className="font-semibold">
-                    {runtimeStatus?.executionMode ?? "unknown"}
-                  </span>
-                  {runtimeStatus?.executionMode === "shell"
-                    ? " (real Playwright command execution)"
-                    : " (simulated completion/stub mode)"}.
-                </p>
-                <p className="mt-1 text-xs text-ink-600 dark:text-slate-300">
-                  To run real UI tests, set <code>QA_RUNNER_PLAYWRIGHT_EXECUTION_MODE=shell</code> and restart API.
-                </p>
-                <p className="mt-1 text-xs text-ink-600 dark:text-slate-300">
-                  Playwright UI bridge:{" "}
-                  <span className="font-semibold">{playwrightUiBridgeEnabled ? "enabled" : "disabled"}</span>. Control
-                  with <code>QA_RUNNER_PLAYWRIGHT_UI_ENABLED</code>.
-                </p>
-                <p className="mt-1 text-xs text-ink-600 dark:text-slate-300">
-                  Optional timeout: <code>QA_RUNNER_PLAYWRIGHT_TIMEOUT_MS</code> (current{" "}
-                  {runtimeStatus?.executionTimeoutMs ?? "n/a"} ms).
-                </p>
-                <p className="mt-1 text-xs text-ink-600 dark:text-slate-300">
-                  Runner workspace root: <code>{runtimeStatus?.workspaceRoot ?? "auto-detected"}</code>. Set{" "}
-                  <code>QA_RUNNER_WORKSPACE_ROOT</code> if your API process is started from a nested directory.
-                </p>
-                <p className="mt-1 text-xs text-ink-600 dark:text-slate-300">
-                  Manual case folder: <code>{runtimeStatus?.casesRoot ?? "docs/qa-cases"}</code>. Configure with{" "}
-                  <code>QA_RUNNER_CASES_DIR</code> (relative to workspace root).
-                </p>
-                <p className="mt-1 text-xs text-ink-600 dark:text-slate-300">
-                  Evidence storage: <code>{runtimeStatus?.evidenceStorageMode ?? "metadata_only"}</code>. Store only
-                  artifact references (for example <code>qa://...</code> or <code>file:...</code>), not raw binary payloads.
-                </p>
-                <p className="mt-1 text-xs text-ink-600 dark:text-slate-300">
-                  Execution isolation: <code>{runtimeStatus?.executionIsolationMode ?? "local_worker"}</code> · QA data
-                  scope: <code>{runtimeStatus?.qaDataScopeMode ?? "global"}</code>.
-                </p>
-                <p className="mt-1 text-xs text-ink-600 dark:text-slate-300">
-                  Extraction timing: <code>{runtimeStatus?.extractionTiming ?? "in_repo_until_v1"}</code> (QA runner
-                  stays plugin-scoped in this repo through v1 template release).
-                </p>
-                <p className="mt-1 text-xs text-ink-600 dark:text-slate-300">
-                  POM rules: mode <code>{runtimeStatus?.pomRuleMode ?? "warn"}</code> with direct-locator threshold{" "}
-                  <code>{runtimeStatus?.pomDirectLocatorThreshold ?? 8}</code>. Configure with{" "}
-                  <code>QA_RUNNER_POM_RULE_MODE</code> and <code>QA_RUNNER_POM_DIRECT_LOCATOR_THRESHOLD</code>.
-                </p>
-                <p className="mt-1 text-xs text-ink-600 dark:text-slate-300">
-                  Scheduled alert-only checks:{" "}
-                  <span className="font-semibold">
-                    {runtimeStatus?.scheduledAlertOnlyEnabled ? "enabled" : "disabled"}
-                  </span>
-                  {runtimeStatus?.scheduledAlertOnlyEnabled ? (
+              <div className="flex flex-wrap gap-2">
+                {([
+                  { id: "execute", label: "Execute" },
+                  { id: "generate", label: "Generate" },
+                  { id: "history", label: "History & Insights" },
+                ] as Array<{ id: AiViewTab; label: string }>).map((tab) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => setAiViewTab(tab.id)}
+                    className={`rounded-lg px-3 py-1.5 text-sm font-semibold ${
+                      aiViewTab === tab.id
+                        ? "bg-brand-500 text-white"
+                        : "border border-surface-300 text-ink-700 dark:border-slate-700 dark:text-slate-200"
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+
+              {aiViewTab === "execute" ? (
+                <div className="rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-xs text-emerald-900 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-200">
+                  <p className="font-semibold">Self-Healing Snapshot</p>
+                  {healingActivitySummary ? (
                     <>
-                      {" "}
-                      every <code>{formatDurationMinutes(runtimeStatus?.scheduledAlertOnlyIntervalMs)}</code> (
-                      <code>{runtimeStatus?.scheduledAlertOnlyIntervalMs ?? 3600000}ms</code>) as actor{" "}
-                      <code>{runtimeStatus?.scheduledAlertOnlyActorId ?? "qa-scheduler"}</code>, max iterations{" "}
-                      <code>{runtimeStatus?.scheduledAlertOnlyMaxIterations ?? 15}</code>.
+                      <p className="mt-1">
+                        Proposals {healingActivitySummary.total} · Applied {healingActivitySummary.appliedCount} · Failed{" "}
+                        {healingActivitySummary.failedCount} · Retest passed {healingActivitySummary.retestPassedCount} ·
+                        Retest failed {healingActivitySummary.retestFailedCount}
+                      </p>
+                      {healingActivitySummary.affectedFiles.length > 0 ? (
+                        <p className="mt-1">
+                          Files healed: <code>{healingActivitySummary.affectedFiles.join(", ")}</code>
+                        </p>
+                      ) : null}
                     </>
                   ) : (
-                    <>
-                      {" "}
-                      Enable with <code>QA_RUNNER_SCHEDULE_ALERT_ONLY_ENABLED=true</code>.
-                    </>
+                    <p className="mt-1">No healing proposals available yet for the current AI job.</p>
                   )}
-                </p>
-                <p className="mt-2 text-xs text-ink-600 dark:text-slate-300">
-                  QA daemon runs in the background. Clicking <span className="font-semibold">Run Tests</span> starts one
-                  execution job and updates this page live.
-                </p>
-                <p className="mt-1 text-xs text-ink-600 dark:text-slate-300">
-                  No new tab is required. Playwright recorder/codegen tab integration is not wired in this flow yet.
-                </p>
-                <p className="mt-1 text-xs text-ink-600 dark:text-slate-300">
-                  <span className="font-semibold">Continuous Auto-Fix</span> runs one batch, then stops. It is not an
-                  infinite background loop.
-                </p>
-              </div>
-
-              <div className="rounded-lg border border-surface-300 bg-white p-3 text-sm dark:border-slate-700 dark:bg-slate-900">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="font-semibold text-ink-900 dark:text-white">Flakiness Dashboard</p>
-                  <button
-                    type="button"
-                    onClick={() => void loadFlakinessReport()}
-                    disabled={flakinessLoading}
-                    className="rounded-lg border border-surface-300 px-2 py-1 text-xs font-semibold text-ink-700 disabled:opacity-60 dark:border-slate-700 dark:text-slate-200"
-                  >
-                    {flakinessLoading ? "Refreshing..." : "Refresh Flakiness"}
-                  </button>
                 </div>
-                {flakinessReport ? (
-                  <>
-                    <p className="mt-2 text-xs text-ink-600 dark:text-slate-300">
-                      Cases: <span className="font-semibold">{flakinessReport.summary.totalCases}</span> · Unstable:{" "}
-                      <span className="font-semibold">{flakinessReport.summary.unstableCases}</span> · Avg flake score:{" "}
-                      <span className="font-semibold">{flakinessReport.summary.avgFlakeScore}</span> · Trend:{" "}
-                      <span className="font-semibold">{flakinessReport.summary.trend}</span>
-                    </p>
-                    <p className="mt-1 text-xs text-ink-600 dark:text-slate-300">
-                      Categories — selector: <span className="font-semibold">{flakinessReport.summary.categories.selector}</span>,
-                      timing: <span className="font-semibold"> {flakinessReport.summary.categories.timing}</span>,
-                      assertion: <span className="font-semibold"> {flakinessReport.summary.categories.assertion}</span>
-                    </p>
-                    {flakinessReport.records.length > 0 ? (
-                      <div className="mt-2 max-h-44 overflow-auto rounded border border-surface-300 dark:border-slate-700">
-                        <table className="min-w-full text-xs">
-                          <thead className="bg-surface-50 dark:bg-slate-950/40">
-                            <tr>
-                              <th className="px-2 py-1 text-left">Case</th>
-                              <th className="px-2 py-1 text-left">Flake</th>
-                              <th className="px-2 py-1 text-left">Pass Rate</th>
-                              <th className="px-2 py-1 text-left">Runs</th>
-                              <th className="px-2 py-1 text-left">Category</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {flakinessReport.records.slice(0, 8).map((record) => (
-                              <tr key={record.testId} className="border-t border-surface-200 dark:border-slate-800">
-                                <td className="px-2 py-1"><code>{record.testId}</code></td>
-                                <td className="px-2 py-1">{record.flakeScore}</td>
-                                <td className="px-2 py-1">{record.passRate}</td>
-                                <td className="px-2 py-1">{record.totalRuns}</td>
-                                <td className="px-2 py-1">{record.dominantCategory ?? "none"}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    ) : (
-                      <p className="mt-2 text-xs text-ink-600 dark:text-slate-300">No flakiness records yet.</p>
-                    )}
-                    {flakinessReport.recommendations.length > 0 ? (
-                      <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-ink-700 dark:text-slate-200">
-                        {flakinessReport.recommendations.map((item, index) => (
-                          <li key={`${item}-${index}`}>{item}</li>
-                        ))}
-                      </ul>
-                    ) : null}
-                  </>
-                ) : (
-                  <p className="mt-2 text-xs text-ink-600 dark:text-slate-300">
-                    Flakiness report unavailable. Generate tests to produce runtime records.
-                  </p>
-                )}
-              </div>
+              ) : null}
 
-              <div>
+              {aiViewTab === "history" ? (
+                <div className="rounded-lg border border-surface-300 bg-white p-3 text-sm dark:border-slate-700 dark:bg-slate-900">
+                  <p className="font-semibold text-ink-900 dark:text-white">Flakiness Dashboard</p>
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void loadFlakinessReport()}
+                      disabled={flakinessLoading}
+                      className="rounded-lg border border-surface-300 px-2 py-1 text-xs font-semibold text-ink-700 disabled:opacity-60 dark:border-slate-700 dark:text-slate-200"
+                    >
+                      {flakinessLoading ? "Refreshing..." : "Refresh Flakiness"}
+                    </button>
+                  </div>
+                  {flakinessReport && (flakinessReport.summary.totalCases > 0 || flakinessReport.records.length > 0) ? (
+                    <>
+                      <p className="mt-2 text-xs text-ink-600 dark:text-slate-300">
+                        Cases: <span className="font-semibold">{flakinessReport.summary.totalCases}</span> · Unstable:{" "}
+                        <span className="font-semibold">{flakinessReport.summary.unstableCases}</span> · Avg flake score:{" "}
+                        <span className="font-semibold">{flakinessReport.summary.avgFlakeScore}</span> · Trend:{" "}
+                        <span className="font-semibold">{flakinessReport.summary.trend}</span>
+                      </p>
+                    </>
+                  ) : (
+                    <p className="mt-2 text-xs text-ink-600 dark:text-slate-300">
+                      Insufficient flakiness data yet. Run more AI executions to build trend metrics.
+                    </p>
+                  )}
+                  <div className="mt-3">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-ink-500 dark:text-slate-400">
+                      AI Run History
+                    </p>
+                    {runHistoryLoading ? (
+                      <p className="mt-1 text-xs text-ink-600 dark:text-slate-300">Loading runs...</p>
+                    ) : aiRunHistory.length === 0 ? (
+                      <p className="mt-1 text-xs text-ink-600 dark:text-slate-300">No AI runs found for selected suite.</p>
+                    ) : (
+                      <div className="mt-2 max-h-48 space-y-2 overflow-auto">
+                        {aiRunHistory.map((run) => (
+                          <div
+                            key={run.id}
+                            className="flex items-center justify-between gap-2 rounded-lg border border-surface-200 bg-white px-2 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-900"
+                          >
+                            <div>
+                              <p className="font-semibold text-ink-900 dark:text-white">
+                                <code>{run.id}</code>
+                              </p>
+                              <p className="text-ink-600 dark:text-slate-300">
+                                {run.status} · {new Date(run.createdAt).toLocaleString()}
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => void openRunFromHistory(run.id, run.status)}
+                              disabled={busy}
+                              className="rounded-lg border border-brand-300 px-2 py-1 text-xs font-semibold text-brand-700 disabled:opacity-60 dark:border-brand-700 dark:text-brand-300"
+                            >
+                              Open
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <div className="mt-3 rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-xs text-emerald-900 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-200">
+                    <p className="font-semibold">Self-Healing Timeline</p>
+                    {healingActivitySummary ? (
+                      <>
+                        <p className="mt-1">
+                          Proposals {healingActivitySummary.total} · Applied {healingActivitySummary.appliedCount} ·
+                          Failed {healingActivitySummary.failedCount} · Retest passed{" "}
+                          {healingActivitySummary.retestPassedCount} · Retest failed{" "}
+                          {healingActivitySummary.retestFailedCount}
+                        </p>
+                        {healingActivitySummary.latestAppliedAt ? (
+                          <p className="mt-1">
+                            Last applied at <code>{healingActivitySummary.latestAppliedAt}</code>
+                          </p>
+                        ) : null}
+                        {healingActivitySummary.affectedFiles.length > 0 ? (
+                          <p className="mt-1">
+                            Files healed: <code>{healingActivitySummary.affectedFiles.join(", ")}</code>
+                          </p>
+                        ) : null}
+                      </>
+                    ) : (
+                      <p className="mt-1">No healing activity captured yet for current job.</p>
+                    )}
+                  </div>
+                </div>
+              ) : null}
+
+              {aiViewTab === "execute" ? (
+                <div className="rounded-lg border border-surface-300 bg-surface-50 p-3 text-xs text-ink-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+                  Runtime settings moved to the <span className="font-semibold">Settings</span> navigation tab.
+                </div>
+              ) : null}
+
+              {aiViewTab === "generate" ? (
+                <div>
                 <label className="block text-sm font-semibold text-ink-800 dark:text-slate-200">Feature Use Case Prompt</label>
                 <textarea
                   value={generatePrompt}
@@ -2661,7 +3215,8 @@ const ManualTestingPageContent = ({
                   placeholder="Example: Trello -> AI/RAG -> InDesign -> Canto pipeline runs."
                   className="mt-1 w-full rounded-lg border border-surface-300 bg-white px-3 py-2 text-sm text-ink-900 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
                 />
-              </div>
+                </div>
+              ) : null}
 
               <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                 <select
@@ -2675,33 +3230,42 @@ const ManualTestingPageContent = ({
                     </option>
                   ))}
                 </select>
-                <input
-                  value={generatePlugins}
-                  onChange={(event) => setGeneratePlugins(event.target.value)}
-                  placeholder="plugin scope (comma separated)"
-                  className="rounded-lg border border-surface-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-900"
-                />
-                <input
-                  value={generateRoutes}
-                  onChange={(event) => setGenerateRoutes(event.target.value)}
-                  placeholder="route scope (comma separated)"
-                  className="rounded-lg border border-surface-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-900"
-                />
-                <input
-                  value={existingTestDir}
-                  onChange={(event) => setExistingTestDir(event.target.value)}
-                  placeholder="existing tests dir (e.g. e2e/ui/tests)"
-                  className="rounded-lg border border-surface-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-900"
-                />
-                <input
-                  value={existingTags}
-                  onChange={(event) => setExistingTags(event.target.value)}
-                  placeholder="existing suite tag filter (comma separated)"
-                  className="rounded-lg border border-surface-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-900"
-                />
+                {aiViewTab === "generate" ? (
+                  <input
+                    value={generatePlugins}
+                    onChange={(event) => setGeneratePlugins(event.target.value)}
+                    placeholder="plugin scope (comma separated)"
+                    className="rounded-lg border border-surface-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-900"
+                  />
+                ) : null}
+                {aiViewTab === "generate" ? (
+                  <input
+                    value={generateRoutes}
+                    onChange={(event) => setGenerateRoutes(event.target.value)}
+                    placeholder="route scope (comma separated)"
+                    className="rounded-lg border border-surface-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-900"
+                  />
+                ) : null}
+                {aiViewTab !== "history" ? (
+                  <input
+                    value={existingTestDir}
+                    onChange={(event) => setExistingTestDir(event.target.value)}
+                    placeholder="existing tests dir (e.g. e2e/ui/tests)"
+                    className="rounded-lg border border-surface-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-900"
+                  />
+                ) : null}
+                {aiViewTab !== "history" ? (
+                  <input
+                    value={existingTags}
+                    onChange={(event) => setExistingTags(event.target.value)}
+                    placeholder="existing suite tag filter (comma separated)"
+                    className="rounded-lg border border-surface-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-900"
+                  />
+                ) : null}
               </div>
 
-              <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+              {aiViewTab === "generate" ? (
+                <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
                 {testProfileOptions.map((profile) => (
                   <label
                     key={profile.id}
@@ -2739,8 +3303,9 @@ const ManualTestingPageContent = ({
                     </span>
                   </label>
                 ))}
-              </div>
-              {customTestTypes.length > 0 ? (
+                </div>
+              ) : null}
+              {aiViewTab === "generate" && customTestTypes.length > 0 ? (
                 <div className="mt-3">
                   <p className="text-xs font-semibold uppercase tracking-wide text-ink-500 dark:text-slate-400">
                     Custom Test Types
@@ -2788,141 +3353,317 @@ const ManualTestingPageContent = ({
                 </div>
               ) : null}
 
-              <div className="space-y-3">
-                <p className="text-xs font-semibold uppercase tracking-wide text-ink-500 dark:text-slate-400">
-                  Workflow Actions
-                </p>
-                <div className="rounded-lg border border-surface-300 bg-surface-50 p-3 text-sm text-ink-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
-                  <p className="font-semibold">Beginner Workflow (Recommended)</p>
-                  <p className="mt-1 text-xs text-ink-600 dark:text-slate-300">
-                    Step 1 loads existing Playwright specs. Step 2 runs one AI execution job. Step 3 runs one auto-fix/retest cycle.
+              {aiViewTab === "execute" ? (
+                <div className="space-y-3">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-ink-500 dark:text-slate-400">
+                    Run Config
                   </p>
-                </div>
-                <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
-                  <button
-                    type="button"
-                    onClick={() => void loadExistingSuiteAction()}
-                    disabled={busy}
-                    title="Loads existing Playwright specs from the configured test directory into the QA job context."
-                    aria-label="Step 1: Load existing Playwright suite"
-                    className="min-h-[2.5rem] touch-manipulation rounded-lg border border-indigo-300 bg-white px-4 py-2.5 text-sm font-semibold text-indigo-700 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-indigo-800 dark:bg-slate-900 dark:text-indigo-300 dark:hover:bg-slate-800"
-                  >
-                    1) Load Existing Suite
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void executeAiRunAction()}
-                    disabled={busy || !generationJob || !playwrightUiBridgeEnabled}
-                    title="Prepares and starts one AI test execution job, then streams status and artifacts here."
-                    aria-label="Step 2: Run tests with AI"
-                    className="min-h-[2.5rem] touch-manipulation rounded-lg border border-emerald-600 bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    2) Run Tests (Prepare + Execute)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void runAutomationAction("continuous_fix")}
-                    disabled={busy || !generationJob}
-                    title="Runs one continuous auto-fix cycle: apply proposals, retest, then stop."
-                    aria-label="Step 3: Run one-time auto-fix and retest"
-                    className="min-h-[2.5rem] touch-manipulation rounded-lg border border-teal-300 bg-teal-50 px-4 py-2.5 text-sm font-semibold text-teal-900 transition-colors hover:bg-teal-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-teal-900/50 dark:bg-teal-950/30 dark:text-teal-200 dark:hover:bg-teal-950/50"
-                  >
-                    3) Auto-Fix + Retest (One-Time)
-                  </button>
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setShowAdvancedActions((prev) => !prev)}
-                    title="Shows expert controls for manual phase-by-phase QA operations."
-                    aria-label="Toggle advanced QA workflow actions"
-                    className="min-h-[2.5rem] touch-manipulation rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-800 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
-                  >
-                    {showAdvancedActions ? "Hide Advanced Actions" : "Show Advanced Actions"}
-                  </button>
-                  <p className="text-xs text-ink-600 dark:text-slate-300">Use advanced only if you need manual phase control.</p>
-                </div>
-                {showAdvancedActions ? (
-                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
-                  <button
-                    type="button"
-                    onClick={() => void runGeneration()}
-                    disabled={busy}
-                    className="min-h-[2.5rem] touch-manipulation rounded-lg border border-sky-600 bg-sky-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    Generate Checklist
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void runGenerateTests()}
-                    disabled={busy}
-                    className="min-h-[2.5rem] touch-manipulation rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-800 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
-                  >
-                    Generate Tests (AI Draft)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void runIntelligentReviewAction()}
-                    disabled={busy || !generationJob?.result?.review}
-                    className="min-h-[2.5rem] touch-manipulation rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-800 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
-                  >
-                    Intelligent Review
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void generateFixProposalsAction()}
-                    disabled={busy || !generationJob?.result?.intelligentReview}
-                    className="min-h-[2.5rem] touch-manipulation rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-800 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
-                  >
-                    Generate Fix Proposals
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void loadGeneratedTestsAction()}
-                    disabled={busy || !generationJob}
-                    className="min-h-[2.5rem] touch-manipulation rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-800 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
-                  >
-                    Load Tests
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void prepareAiRunAction()}
-                    disabled={busy || !generationJob || !playwrightUiBridgeEnabled}
-                    className="min-h-[2.5rem] touch-manipulation rounded-lg border border-emerald-300 bg-emerald-50 px-4 py-2.5 text-sm font-semibold text-emerald-900 transition-colors hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-200 dark:hover:bg-emerald-950/50"
-                  >
-                    Prepare AI Run
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void executeAiRunAction()}
-                    disabled={busy || !generationJob || !playwrightUiBridgeEnabled}
-                    className="min-h-[2.5rem] touch-manipulation rounded-lg border border-emerald-600 bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    Execute AI Run
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void runAutomationAction("alert_only")}
-                    disabled={busy || !generationJob}
-                    className="min-h-[2.5rem] touch-manipulation rounded-lg border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm font-semibold text-amber-900 transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200 dark:hover:bg-amber-950/50"
-                  >
-                    Alert-Only Check
-                  </button>
-                  {generationJob ? (
+                  <div className="rounded-lg border border-surface-300 bg-surface-50 p-3 text-sm text-ink-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
+                    <p className="font-semibold">Single-Click AI Cycle</p>
+                    <p className="mt-1 text-xs text-ink-600 dark:text-slate-300">
+                      Executes load (if needed) + prepare + run as one action. Use Advanced Controls only for debugging.
+                    </p>
+                    <label
+                      className="mt-2 inline-flex items-center gap-2 text-xs text-ink-700 dark:text-slate-300"
+                      title="When enabled, a failed run automatically triggers one self-heal + retest pass."
+                    >
+                      <input
+                        type="checkbox"
+                        checked={autoHealOnFailure}
+                        onChange={(event) => setAutoHealOnFailure(event.target.checked)}
+                        className="h-3.5 w-3.5 rounded border-surface-300 text-brand-500 focus:ring-brand-500 dark:border-slate-700"
+                      />
+                      Auto-heal on failure
+                    </label>
+                    <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-2">
+                      <button
+                        type="button"
+                        onClick={() => void executeAiRunAction()}
+                        disabled={executeAiDisabled}
+                        title="Runs the full AI cycle: load existing tests when missing, prepare execution job, execute Playwright, and stream monitor updates."
+                        aria-label="Run AI cycle"
+                        className="min-h-[2.5rem] touch-manipulation rounded-lg border border-emerald-600 bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {aiExecutionRunning
+                          ? "AI Cycle In Progress..."
+                          : autoHealOnFailure
+                            ? "Run AI Cycle (Auto-Heal)"
+                            : "Run AI Cycle"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void runAutomationAction("continuous_fix")}
+                        disabled={busy || aiExecutionRunning}
+                        title="Runs one self-healing cycle using the latest fix proposals, then retests."
+                        aria-label="Run self-healing one-time cycle"
+                        className="min-h-[2.5rem] touch-manipulation rounded-lg border border-teal-300 bg-teal-50 px-4 py-2.5 text-sm font-semibold text-teal-900 transition-colors hover:bg-teal-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-teal-900/50 dark:bg-teal-950/30 dark:text-teal-200 dark:hover:bg-teal-950/50"
+                      >
+                        Self-Heal + Retest
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-surface-300 bg-white p-3 dark:border-slate-700 dark:bg-slate-900">
+                    <div className="mb-2 flex items-center justify-between text-xs">
+                      <span className="font-semibold text-ink-700 dark:text-slate-200">Execution Monitor</span>
+                      <span className="text-ink-600 dark:text-slate-300">{Math.round(aiExecutionProgress)}%</span>
+                    </div>
+                    <div
+                      className="h-2 w-full overflow-hidden rounded-full bg-surface-200 dark:bg-slate-800"
+                      role="progressbar"
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-valuenow={Math.round(aiExecutionProgress)}
+                    >
+                      <div
+                        className={[
+                          "h-full transition-all duration-500",
+                          executeResult?.status === "failed"
+                            ? "bg-rose-500"
+                            : executeResult?.status === "cancelled"
+                              ? "bg-amber-500"
+                              : "bg-emerald-500",
+                        ].join(" ")}
+                        style={{ width: `${Math.round(aiExecutionProgress)}%` }}
+                      />
+                    </div>
+                    <p className="mt-2 text-xs text-ink-600 dark:text-slate-300">{aiExecutionProgressLabel}</p>
+                    {aiExecutionDetailLabel ? (
+                      <p className="mt-1 text-xs text-ink-600 dark:text-slate-300">{aiExecutionDetailLabel}</p>
+                    ) : null}
+                    <div className="mt-2 grid grid-cols-1 gap-1 text-xs text-ink-700 dark:text-slate-300 md:grid-cols-2">
+                      <p>
+                        Current test:{" "}
+                        <span className="font-semibold">{executeResult?.currentTest ?? "waiting for runner output"}</span>
+                      </p>
+                      <p>
+                        Runner process:{" "}
+                        <span className="font-semibold">
+                          {executeResult?.processAlive ? "alive" : executeResult?.status === "running" ? "starting" : "stopped"}
+                        </span>
+                      </p>
+                      <p>
+                        Last activity:{" "}
+                        <span className="font-semibold">
+                          {typeof aiLastActivitySeconds === "number" ? `${aiLastActivitySeconds}s ago` : "not yet"}
+                        </span>
+                      </p>
+                      <p>
+                        Healing engine:{" "}
+                        <span className="font-semibold">
+                          {automationRunning
+                            ? "running"
+                            : generationJob?.result?.automation
+                              ? `last=${generationJob.result.automation.status}`
+                              : "idle"}
+                        </span>
+                      </p>
+                    </div>
+                    {aiExecutionStalled ? (
+                      <div className="mt-2 rounded border border-amber-300 bg-amber-50 px-2 py-1 text-xs text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
+                        No runner activity for {aiLastActivitySeconds ?? 0}s. This may be a long test or a stuck process. Check
+                        Playwright UI/logs.
+                      </div>
+                    ) : null}
+                  </div>
+                  <div className="rounded-lg border border-teal-300 bg-teal-50 p-3 text-xs text-teal-900 dark:border-teal-900/50 dark:bg-teal-950/30 dark:text-teal-200">
+                    <div className="mb-1 flex items-center justify-between">
+                      <p className="font-semibold">Healing Activity</p>
+                      <p className="font-semibold">{Math.round(healingProgressPercent)}%</p>
+                    </div>
+                    <div
+                      className="h-2 w-full overflow-hidden rounded-full bg-teal-100 dark:bg-teal-900/40"
+                      role="progressbar"
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-valuenow={Math.round(healingProgressPercent)}
+                    >
+                      <div
+                        className={[
+                          "h-full transition-all duration-500",
+                          healingProgressLabel === "Failed" ? "bg-rose-500" : "bg-teal-500",
+                        ].join(" ")}
+                        style={{ width: `${Math.round(healingProgressPercent)}%` }}
+                      />
+                    </div>
+                    <p className="mt-1">{healingProgressLabel}</p>
+                    {automationExecutionStatus ? (
+                      <p className="mt-1">
+                        Backend: <span className="font-semibold">{automationExecutionStatus.status}</span> · processed{" "}
+                        <span className="font-semibold">
+                          {automationExecutionStatus.processedProposals}/{automationExecutionStatus.totalProposals}
+                        </span>
+                      </p>
+                    ) : null}
+                    {healingRunSnapshot ? (
+                      <>
+                        <p>
+                          Planned: <span className="font-semibold">{healingRunSnapshot.planned}</span> · Applied:{" "}
+                          <span className="font-semibold">{healingRunSnapshot.applied}</span> · Retest passed:{" "}
+                          <span className="font-semibold">{healingRunSnapshot.passedRetests}</span> · Retest failed:{" "}
+                          <span className="font-semibold">{healingRunSnapshot.failedRetests}</span>
+                        </p>
+                        <p className="mt-1">
+                          Started: <code>{healingRunSnapshot.startedAt}</code>
+                          {healingRunSnapshot.completedAt ? (
+                            <>
+                              {" "}
+                              · Completed: <code>{healingRunSnapshot.completedAt}</code>
+                            </>
+                          ) : null}
+                        </p>
+                        <p className="mt-1">
+                          Files changed:{" "}
+                          {healingChangedFiles.length > 0 ? (
+                            <code>{healingChangedFiles.join(", ")}</code>
+                          ) : (
+                            <span className="font-semibold">none yet</span>
+                          )}
+                        </p>
+                      </>
+                    ) : (
+                      <p>No healing run started yet.</p>
+                    )}
+                    {healingActivityLog.length > 0 ? (
+                      <div className="mt-2 max-h-28 overflow-auto rounded border border-teal-300 bg-white/70 p-2 dark:border-teal-900/50 dark:bg-slate-900/70">
+                        {healingActivityLog.map((line, index) => (
+                          <p key={`${line}-${index}`} className="whitespace-pre-wrap">
+                            {line}
+                          </p>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
                     <button
                       type="button"
-                      onClick={() => void fetchQaGenerationJob(generationJob.id).then(setGenerationJob).catch(() => undefined)}
-                      disabled={busy}
+                      onClick={() => setShowAdvancedActions((prev) => !prev)}
+                      title="Shows manual step-by-step controls (load, prepare, execute, refresh)."
+                      aria-label="Toggle advanced execution controls"
                       className="min-h-[2.5rem] touch-manipulation rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-800 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
                     >
-                      Refresh Job
+                      {showAdvancedActions ? "Hide Advanced Controls" : "Show Advanced Controls"}
                     </button>
-                  ) : null}
+                    <p className="text-xs text-ink-600 dark:text-slate-300">Use these controls only for troubleshooting.</p>
                   </div>
-                ) : null}
-              </div>
 
-              {generationHistory.length > 0 ? (
+                  {showAdvancedActions ? (
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                      <button
+                        type="button"
+                        onClick={() => void loadExistingSuiteAction()}
+                        disabled={busy || aiExecutionRunning}
+                        title="Loads tests from the configured directory into the current generation job."
+                        className="min-h-[2.5rem] touch-manipulation rounded-lg border border-indigo-300 bg-white px-4 py-2.5 text-sm font-semibold text-indigo-700 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-indigo-800 dark:bg-slate-900 dark:text-indigo-300 dark:hover:bg-slate-800"
+                      >
+                        Load Existing Suite
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void prepareAiRunAction()}
+                        disabled={busy || !generationJob || !playwrightUiBridgeEnabled || aiExecutionRunning}
+                        title="Creates a fresh execution job without starting it."
+                        className="min-h-[2.5rem] touch-manipulation rounded-lg border border-emerald-300 bg-emerald-50 px-4 py-2.5 text-sm font-semibold text-emerald-900 transition-colors hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-200 dark:hover:bg-emerald-950/50"
+                      >
+                        Prepare AI Run
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void executeAiRunAction()}
+                        disabled={executeAiDisabled}
+                        title="Starts the prepared run. If no prepared job exists, it auto-prepares first."
+                        className="min-h-[2.5rem] touch-manipulation rounded-lg border border-emerald-600 bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {aiExecutionRunning ? "AI Run In Progress..." : "Execute AI Run"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void loadRuntimeStatus()}
+                        disabled={runtimeLoading}
+                        title="Refreshes daemon runtime settings and execution mode."
+                        className="min-h-[2.5rem] touch-manipulation rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-800 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
+                      >
+                        {runtimeLoading ? "Refreshing..." : "Refresh Runtime"}
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {aiViewTab === "generate" ? (
+                <div className="space-y-3">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-ink-500 dark:text-slate-400">
+                    Generation Tools
+                  </p>
+                  <div className="rounded-lg border border-surface-300 bg-surface-50 p-3 text-sm text-ink-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
+                    <p className="font-semibold">Build and review tests before execution</p>
+                    <p className="mt-1 text-xs text-ink-600 dark:text-slate-300">
+                      Generate checklists/tests and inspect quality/proposals. Execution lives in the Execute tab.
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                    <button
+                      type="button"
+                      onClick={() => void runGeneration()}
+                      disabled={busy}
+                      title="Generates a manual QA checklist from prompt/scope."
+                      className="min-h-[2.5rem] touch-manipulation rounded-lg border border-sky-600 bg-sky-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Generate Checklist
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void runGenerateTests()}
+                      disabled={busy}
+                      title="Generates Playwright test drafts from selected test profiles."
+                      className="min-h-[2.5rem] touch-manipulation rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-800 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
+                    >
+                      Generate Tests (AI Draft)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void runIntelligentReviewAction()}
+                      disabled={busy || !generationJob?.result?.review}
+                      title="Reviews generated tests for risk, stability, and coverage issues."
+                      className="min-h-[2.5rem] touch-manipulation rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-800 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
+                    >
+                      Intelligent Review
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void generateFixProposalsAction()}
+                      disabled={busy || !generationJob?.result?.intelligentReview}
+                      title="Creates code-level fix proposals from intelligent review findings."
+                      className="min-h-[2.5rem] touch-manipulation rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-800 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
+                    >
+                      Generate Fix Proposals
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void loadGeneratedTestsAction()}
+                      disabled={busy || !generationJob}
+                      title="Loads generated tests into the current run context."
+                      className="min-h-[2.5rem] touch-manipulation rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-800 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
+                    >
+                      Load Tests
+                    </button>
+                    {generationJob ? (
+                      <button
+                        type="button"
+                        onClick={() => void fetchQaGenerationJob(generationJob.id).then(setGenerationJob).catch(() => undefined)}
+                        disabled={busy}
+                        title="Refreshes the current generation job payload and status."
+                        className="min-h-[2.5rem] touch-manipulation rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-800 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
+                      >
+                        Refresh Job
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+              ) : null}
+
+              {aiViewTab === "generate" && generationHistory.length > 0 ? (
                 <div className="rounded-lg border border-surface-300 bg-surface-50 p-3 text-xs text-ink-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
                   <p className="font-semibold">Recent Generations</p>
                   <ul className="mt-2 space-y-1">
@@ -2940,7 +3681,7 @@ const ManualTestingPageContent = ({
                 </div>
               ) : null}
 
-              {generationJob ? (
+              {aiViewTab === "generate" && generationJob ? (
                 <div className="space-y-3 rounded-lg border border-surface-300 p-4 dark:border-slate-700">
                   <p className="text-sm text-ink-700 dark:text-slate-200">
                     Job <code>{generationJob.id}</code> · status <span className="font-semibold">{generationJob.status}</span>
@@ -3016,14 +3757,56 @@ const ManualTestingPageContent = ({
                       <p className="font-semibold">
                         Fix Proposals · {generationJob.result.intelligentFixProposals.length} generated
                       </p>
+                      <div className="mt-2">
+                        <button
+                          type="button"
+                          onClick={() => void applyAllFixProposalsAction()}
+                          disabled={
+                            busy ||
+                            !generationJob.result.intelligentFixProposals.some(
+                              (proposal) => proposal.status !== "applied" && proposal.changeType !== "app_plus_test",
+                            )
+                          }
+                          className="rounded border border-fuchsia-400 bg-white px-2 py-1 text-[11px] font-semibold text-fuchsia-800 disabled:opacity-60 dark:border-fuchsia-700 dark:bg-slate-900 dark:text-fuchsia-200"
+                          title="Apply all eligible (non app_plus_test) proposals in one action."
+                        >
+                          Apply All Eligible
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void retestAllAppliedProposalsAction()}
+                          disabled={
+                            busy ||
+                            !generationJob.result.intelligentFixProposals.some(
+                              (proposal) => proposal.status === "applied" && proposal.changeType !== "app_plus_test",
+                            )
+                          }
+                          className="ml-2 rounded border border-blue-400 bg-white px-2 py-1 text-[11px] font-semibold text-blue-800 disabled:opacity-60 dark:border-blue-700 dark:bg-slate-900 dark:text-blue-200"
+                          title="Retest all currently applied (non app_plus_test) proposals."
+                        >
+                          Retest All Applied
+                        </button>
+                      </div>
+                      {generationJob.result.intelligentFixProposals.some((proposal) => proposal.changeType === "app_plus_test") ? (
+                        <p className="mt-1 rounded border border-amber-300 bg-amber-50 px-2 py-1 text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
+                          Some proposals require app code changes (`app_plus_test`). Auto-apply is blocked; apply those manually in app code first.
+                        </p>
+                      ) : null}
                       {generationJob.result.intelligentFixProposals.length > 0 ? (
                         <ul className="mt-2 list-disc pl-5">
                           {generationJob.result.intelligentFixProposals.map((proposal) => (
                             <li key={proposal.id}>
                               <span className="font-semibold">[{proposal.priority}]</span> {proposal.title} ·{" "}
                               <code>{proposal.filePath}</code> · risk {proposal.risk} ·{" "}
-                              {(proposal.confidence * 100).toFixed(0)}% · status{" "}
-                              <span className="font-semibold">{proposal.status ?? "pending"}</span>
+                              {(proposal.confidence * 100).toFixed(0)}% · type <code>{proposal.changeType}</code> · status{" "}
+                              <span
+                                className={[
+                                  "inline-flex rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide",
+                                  proposalStatusClass(proposal.status),
+                                ].join(" ")}
+                              >
+                                {proposal.status ?? "pending"}
+                              </span>
                               {proposal.appliedAt ? (
                                 <>
                                   {" "}
@@ -3034,7 +3817,15 @@ const ManualTestingPageContent = ({
                               {proposal.retestStatus ? (
                                 <>
                                   {" "}
-                                  · retest <span className="font-semibold">{proposal.retestStatus}</span>
+                                  · retest{" "}
+                                  <span
+                                    className={[
+                                      "inline-flex rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide",
+                                      proposalRetestClass(proposal.retestStatus),
+                                    ].join(" ")}
+                                  >
+                                    {proposal.retestStatus}
+                                  </span>
                                 </>
                               ) : null}
                               {proposal.retestAt ? (
@@ -3050,15 +3841,15 @@ const ManualTestingPageContent = ({
                               <button
                                 type="button"
                                 onClick={() => void applyFixProposalAction(proposal.id)}
-                                disabled={busy || proposal.status === "applied"}
+                                disabled={busy || proposal.status === "applied" || proposal.changeType === "app_plus_test"}
                                 className="mt-1 rounded border border-fuchsia-400 bg-white px-2 py-1 text-[11px] font-semibold text-fuchsia-800 disabled:opacity-60 dark:border-fuchsia-700 dark:bg-slate-900 dark:text-fuchsia-200"
                               >
-                                Apply Proposal
+                                {proposal.changeType === "app_plus_test" ? "Requires App Change" : "Apply Proposal"}
                               </button>
                               <button
                                 type="button"
                                 onClick={() => void retestFixProposalAction(proposal.id)}
-                                disabled={busy || proposal.status !== "applied"}
+                                disabled={busy || proposal.status !== "applied" || proposal.changeType === "app_plus_test"}
                                 className="ml-2 mt-1 rounded border border-blue-400 bg-white px-2 py-1 text-[11px] font-semibold text-blue-800 disabled:opacity-60 dark:border-blue-700 dark:bg-slate-900 dark:text-blue-200"
                               >
                                 Retest Proposal
@@ -3067,7 +3858,41 @@ const ManualTestingPageContent = ({
                           ))}
                         </ul>
                       ) : (
-                        <p className="mt-1">No proposal candidates were generated for this run.</p>
+                        <div className="mt-1 rounded border border-amber-300 bg-amber-50 px-2 py-1 text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
+                          <p className="font-semibold">No proposal candidates were generated for this run.</p>
+                          {generationJob.result.intelligentFixDiagnostics ? (
+                            <>
+                              <p className="mt-1">
+                                Reason:{" "}
+                                <code>{generationJob.result.intelligentFixDiagnostics.reason}</code>
+                                {" · "}Provider: <code>{generationJob.result.intelligentFixDiagnostics.provider}</code>
+                                {" · "}Vision:{" "}
+                                <span className="font-semibold">
+                                  {generationJob.result.intelligentFixDiagnostics.supportsVision ? "yes" : "no"}
+                                </span>
+                              </p>
+                              <p className="mt-1">
+                                Inspected output lines:{" "}
+                                <span className="font-semibold">
+                                  {generationJob.result.intelligentFixDiagnostics.inspectedOutputLines}
+                                </span>
+                                {" · "}Error contexts:{" "}
+                                <span className="font-semibold">
+                                  {generationJob.result.intelligentFixDiagnostics.inspectedErrorContexts}
+                                </span>
+                              </p>
+                              <p className="mt-1">
+                                Enabled skills:{" "}
+                                <code>
+                                  {(generationJob.result.intelligentFixDiagnostics.enabledSkillIds ?? []).join(", ") || "none"}
+                                </code>
+                              </p>
+                              {generationJob.result.intelligentFixDiagnostics.details ? (
+                                <p className="mt-1">{generationJob.result.intelligentFixDiagnostics.details}</p>
+                              ) : null}
+                            </>
+                          ) : null}
+                        </div>
                       )}
                     </div>
                   ) : null}
@@ -3075,7 +3900,18 @@ const ManualTestingPageContent = ({
                     <div className="rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-xs text-emerald-900 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-200">
                       <p className="font-semibold">
                         Automation Summary · {generationJob.result.automation.strategy} · status{" "}
-                        {generationJob.result.automation.status}
+                        <span
+                          className={[
+                            "inline-flex rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide",
+                            generationJob.result.automation.status === "fixed" || generationJob.result.automation.status === "clean"
+                              ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300"
+                              : generationJob.result.automation.status === "partial"
+                                ? "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+                                : "bg-rose-100 text-rose-800 dark:bg-rose-950/40 dark:text-rose-300",
+                          ].join(" ")}
+                        >
+                          {generationJob.result.automation.status}
+                        </span>
                       </p>
                       <p className="mt-1">{generationJob.result.automation.message}</p>
                       <p className="mt-1">
@@ -3118,21 +3954,21 @@ const ManualTestingPageContent = ({
                 </div>
               ) : null}
 
-              {loadResult ? (
+              {aiViewTab === "execute" && loadResult ? (
                 <div className="rounded-lg border border-surface-300 bg-white p-3 text-sm dark:border-slate-700 dark:bg-slate-900">
                   Loaded <span className="font-semibold">{loadResult.loadedCount}</span> generated tests at{" "}
                   <code>{loadResult.loadedAt}</code>.
                 </div>
               ) : null}
 
-              {prepareResult ? (
+              {aiViewTab === "execute" && prepareResult ? (
                 <div className="rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-900 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-200">
                   AI run prepared for <code>{prepareResult.runId}</code> with{" "}
                   <span className="font-semibold">{prepareResult.selectedTestTypes.join(", ")}</span>.
                 </div>
               ) : null}
 
-              {executeResult ? (
+              {aiViewTab === "execute" && executeResult ? (
                 <div
                   className={
                     executeResult.status === "failed"
@@ -3183,7 +4019,33 @@ const ManualTestingPageContent = ({
                   </p>
                   {aiPollError ? <p className="mt-1 text-xs">Status warning: {aiPollError}</p> : null}
                   {executeResult.error ? <> · Error: {executeResult.error}</> : null}
+                  {aiAssistNote ? <p className="mt-1 text-xs font-semibold text-emerald-700 dark:text-emerald-300">{aiAssistNote}</p> : null}
+                  {executeResult.outputLines && executeResult.outputLines.length > 0 ? (
+                    <div className="mt-2 rounded border border-surface-300 bg-white/60 p-2 text-xs dark:border-slate-700 dark:bg-slate-900/60">
+                      <p className="font-semibold">Recent Runner Output</p>
+                      <pre className="mt-1 max-h-52 overflow-auto whitespace-pre-wrap">{executeResult.outputLines.slice(-20).join("\n")}</pre>
+                    </div>
+                  ) : null}
                   <div className="mt-2">
+                    <button
+                      type="button"
+                      onClick={() => setShowArtifactModal(true)}
+                      disabled={!artifactEntries.some((item) => item.ref)}
+                      className="mr-2 rounded-lg border border-blue-300 px-2 py-1 text-xs font-semibold text-blue-700 disabled:opacity-60 dark:border-blue-900/50 dark:text-blue-300"
+                    >
+                      View Artifacts
+                    </button>
+                    {executeResult.status === "failed" ? (
+                      <button
+                        type="button"
+                        onClick={() => void suggestSelfHealFixesAction()}
+                        disabled={busy || !generationJob}
+                        className="mr-2 rounded-lg border border-teal-300 px-2 py-1 text-xs font-semibold text-teal-700 disabled:opacity-60 dark:border-teal-900/50 dark:text-teal-300"
+                        title="Runs AI review and creates fix proposals for this failure."
+                      >
+                        Suggest Self-Heal Fixes (AI)
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       onClick={() => {
@@ -3211,6 +4073,15 @@ const ManualTestingPageContent = ({
                               completedAt: status.completedAt,
                               playwrightCommand: status.playwrightCommand,
                               playwrightUiUrl: status.playwrightUiUrl ?? undefined,
+                              progressPercent: status.progressPercent,
+                              totalTests: status.totalTests ?? null,
+                              completedTests: status.completedTests ?? 0,
+                              currentTest: status.currentTest ?? null,
+                              lastActivity: status.lastActivity ?? null,
+                              lastActivityAt: status.lastActivityAt ?? null,
+                              processAlive: status.processAlive ?? false,
+                              stalled: status.stalled ?? false,
+                              outputLines: Array.isArray(status.outputLines) ? status.outputLines : [],
                               artifacts: {
                                 reportRef: status.reportRef ?? "",
                                 traceRef: status.traceRef ?? "",
@@ -3253,6 +4124,192 @@ const ManualTestingPageContent = ({
           <p className="text-sm text-ink-600 dark:text-slate-300">
             Runtime details and configuration hints.
           </p>
+          <details className="rounded-lg border border-surface-300 bg-surface-50 p-3 text-sm text-ink-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200" open>
+            <summary className="cursor-pointer list-none">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="font-semibold">Runtime Settings</p>
+                <p className="text-xs text-ink-500 dark:text-slate-400">
+                  {runtimeStatus?.executionMode ?? "unknown"} · advanced
+                </p>
+              </div>
+            </summary>
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+              <p className="text-xs text-ink-600 dark:text-slate-300">
+                Runtime controls and diagnostics for execution mode, visibility, and provider capabilities.
+              </p>
+              <div className="flex items-center gap-2">
+                <label className="text-xs text-ink-600 dark:text-slate-300" title="Runtime refresh mode and auto-refresh cadence.">
+                  Refresh Runtime
+                </label>
+                <select
+                  value={String(runtimeRefreshIntervalMs)}
+                  onChange={(event) => {
+                    const next = Number(event.target.value);
+                    if (next === -1) {
+                      void loadRuntimeStatus();
+                      void loadFlakinessReport();
+                      return;
+                    }
+                    setRuntimeRefreshIntervalMs(Number.isFinite(next) ? next : 0);
+                  }}
+                  className="rounded-lg border border-surface-300 bg-white px-2 py-1 text-xs font-semibold text-ink-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                  aria-label="Runtime refresh options"
+                >
+                  <option value="-1">{runtimeLoading ? "Refreshing..." : "Refresh now"}</option>
+                  <option value="0">Manual only</option>
+                  <option value="15000">Auto every 15s</option>
+                  <option value="30000">Auto every 30s</option>
+                  <option value="60000">Auto every 60s</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-2">
+              <div className="rounded-lg border border-surface-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-950">
+                <p className="text-xs font-semibold uppercase tracking-wide text-ink-500 dark:text-slate-400">Execution Mode</p>
+                <p className="mt-1 text-sm font-semibold text-ink-900 dark:text-white">
+                  {runtimeStatus?.executionMode ?? "unknown"}
+                </p>
+                <p className="mt-1 text-xs text-ink-600 dark:text-slate-300">
+                  {runtimeStatus?.executionMode === "shell"
+                    ? "Real Playwright command execution."
+                    : runtimeStatus?.executionMode === "ui"
+                      ? "Playwright UI mode execution."
+                      : runtimeStatus?.executionMode === "mcp"
+                        ? "Playwright MCP-driven browser actions."
+                      : "Stub/simulated completion mode."}
+                </p>
+              </div>
+              <div className="rounded-lg border border-surface-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-950">
+                <p className="text-xs font-semibold uppercase tracking-wide text-ink-500 dark:text-slate-400">Core Toggles</p>
+                <div className="mt-1 space-y-1 text-xs text-ink-700 dark:text-slate-300">
+                  <p title="Global AI features available in this daemon instance.">
+                    AI enabled: <span className="font-semibold">{runtimeStatus?.aiEnabled ? "on" : "off"}</span>
+                  </p>
+                  <p title="Allows launching and linking the Playwright UI bridge URL from execution status.">
+                    Playwright UI bridge: <span className="font-semibold">{playwrightUiBridgeEnabled ? "on" : "off"}</span>
+                  </p>
+                  <p title="Timeout applied by daemon for a single Playwright execution process.">
+                    Timeout: <code>{runtimeStatus?.executionTimeoutMs ?? 120000}ms</code>
+                  </p>
+                  <p title="Optional server-side webm→mp4 transcode capability for universal playback.">
+                    MP4 transcode:{" "}
+                    <span className="font-semibold">{runtimeStatus?.videoTranscodeAvailable ? "available" : "not available (optional)"}</span>
+                  </p>
+                  {runtimeStatus?.mcp ? (
+                    <p title="Expected headed MCP browser visibility in the current daemon session.">
+                      Visible MCP browser:{" "}
+                      <span className="font-semibold">{runtimeStatus.mcp.visibleBrowserExpected ? "yes" : "no"}</span>
+                      {runtimeStatus.mcp.visibleBrowserReason ? ` · ${runtimeStatus.mcp.visibleBrowserReason}` : ""}
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-3 rounded-lg border border-surface-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-950">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-xs font-semibold uppercase tracking-wide text-ink-500 dark:text-slate-400">AI Provider Capabilities</p>
+                <p className="text-xs text-ink-600 dark:text-slate-300">
+                  Active: <span className="font-semibold">{runtimeStatus?.aiProvider ?? "agent"}</span>
+                  {" · "}
+                  Fallback:{" "}
+                  <code>{(runtimeStatus?.aiProviderFallbackChain ?? ["agent", "local", "remote"]).join(" -> ")}</code>
+                </p>
+              </div>
+              <div className="mt-2 space-y-2">
+                {(runtimeStatus?.aiProviderCapabilities ?? []).map((provider) => (
+                  <div
+                    key={provider.id}
+                    className="rounded-lg border border-surface-200 bg-surface-50 p-2 dark:border-slate-800 dark:bg-slate-900"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-xs font-semibold text-ink-900 dark:text-white">{provider.label}</p>
+                      <span className={provider.enabled ? "text-xs font-semibold text-emerald-700 dark:text-emerald-300" : "text-xs font-semibold text-slate-500 dark:text-slate-400"}>
+                        {provider.enabled ? "enabled" : "disabled"}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-xs text-ink-700 dark:text-slate-300">{provider.bestFor}</p>
+                    <p className="mt-1 text-xs text-ink-600 dark:text-slate-400">
+                      Vision: <span className="font-semibold">{provider.supportsVision ? "yes" : "no"}</span> ·
+                      Code edit: <span className="font-semibold">{provider.supportsCodeEdit ? "yes" : "no"}</span> ·
+                      Tools: <span className="font-semibold">{provider.supportsToolUse ? "yes" : "no"}</span> ·
+                      Long context: <span className="font-semibold">{provider.supportsLongContext ? "yes" : "no"}</span>
+                    </p>
+                    {provider.notes ? <p className="mt-1 text-xs text-ink-500 dark:text-slate-400">{provider.notes}</p> : null}
+                  </div>
+                ))}
+              </div>
+              <p className="mt-2 text-xs text-ink-600 dark:text-slate-400">
+                Hint: use a provider with <span className="font-semibold">Vision=yes</span> for modal/overlay/video-based triage.
+              </p>
+            </div>
+
+            <div className="mt-3 rounded-lg border border-surface-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-950">
+              <p className="text-xs font-semibold uppercase tracking-wide text-ink-500 dark:text-slate-400">Paths and Storage</p>
+              <div className="mt-2 grid grid-cols-1 gap-2 text-xs text-ink-700 dark:text-slate-300 md:grid-cols-2">
+                <p title="Root directory used by daemon to resolve runtime paths.">
+                  Workspace root: <code>{runtimeStatus?.workspaceRoot ?? "auto-detected"}</code>
+                </p>
+                <p title="Folder where manual checklist markdown files are discovered.">
+                  Cases root: <code>{runtimeStatus?.casesRoot ?? "docs/qa-cases"}</code>
+                </p>
+                <p title="How artifact evidence is stored in QA records.">
+                  Evidence storage: <code>{runtimeStatus?.evidenceStorageMode ?? "metadata_only"}</code>
+                </p>
+                <p title="Execution environment isolation model.">
+                  Isolation: <code>{runtimeStatus?.executionIsolationMode ?? "local_worker"}</code>
+                </p>
+                <p title="Scope of QA execution data visibility and storage.">
+                  QA data scope: <code>{runtimeStatus?.qaDataScopeMode ?? "global"}</code>
+                </p>
+                <p title="Current extraction stage for qa-runner architecture rollout.">
+                  Extraction timing: <code>{runtimeStatus?.extractionTiming ?? "in_repo_until_v1"}</code>
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-3 rounded-lg border border-surface-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-950">
+              <p className="text-xs font-semibold uppercase tracking-wide text-ink-500 dark:text-slate-400">Rules and Schedules</p>
+              <div className="mt-2 grid grid-cols-1 gap-2 text-xs text-ink-700 dark:text-slate-300 md:grid-cols-2">
+                <p title="Page Object Model enforcement mode.">
+                  POM mode: <code>{runtimeStatus?.pomRuleMode ?? "off"}</code>
+                </p>
+                <p title="Threshold for direct locator usage before triggering POM warning/strict checks.">
+                  POM direct locator threshold: <code>{runtimeStatus?.pomDirectLocatorThreshold ?? 8}</code>
+                </p>
+                <p title="Whether scheduled alert-only QA runs are enabled.">
+                  Scheduled alert-only:{" "}
+                  <span className="font-semibold">{runtimeStatus?.scheduledAlertOnlyEnabled ? "on" : "off"}</span>
+                </p>
+                {runtimeStatus?.scheduledAlertOnlyEnabled ? (
+                  <p title="Configured scheduled alert-only cadence and actor identity.">
+                    Every <code>{formatDurationMinutes(runtimeStatus?.scheduledAlertOnlyIntervalMs)}</code> as{" "}
+                    <code>{runtimeStatus?.scheduledAlertOnlyActorId ?? "qa-scheduler"}</code>
+                  </p>
+                ) : (
+                  <p title="Environment variable to enable scheduled alert-only runs.">
+                    Enable with <code>QA_RUNNER_SCHEDULE_ALERT_ONLY_ENABLED=true</code>
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <details className="mt-3 rounded-lg border border-surface-200 bg-white p-3 text-xs text-ink-700 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300">
+              <summary className="cursor-pointer font-semibold">Environment Overrides</summary>
+              <div className="mt-2 space-y-1">
+                <p title="Set execution mode for AI/manual browser flows.">`QA_RUNNER_PLAYWRIGHT_EXECUTION_MODE=shell|ui|mcp|stub`</p>
+                <p title="Enable Playwright UI bridge links.">`QA_RUNNER_PLAYWRIGHT_UI_ENABLED=true|false`</p>
+                <p title="Set Playwright execution timeout in milliseconds.">`QA_RUNNER_PLAYWRIGHT_TIMEOUT_MS=120000`</p>
+                <p title="Set workspace root if daemon starts from nested cwd.">`QA_RUNNER_WORKSPACE_ROOT=/path/to/repo`</p>
+                <p title="Set manual checklist folder relative to workspace root.">`QA_RUNNER_CASES_DIR=docs/qa-cases`</p>
+                <p title="Enable periodic alert-only checks.">`QA_RUNNER_SCHEDULE_ALERT_ONLY_ENABLED=true|false`</p>
+                <p title="Primary AI provider used for self-heal triage.">`QA_RUNNER_AI_PROVIDER=agent|local|remote`</p>
+                <p title="Fallback provider order when primary provider cannot handle a request.">`QA_RUNNER_AI_FALLBACK_CHAIN=agent,local,remote`</p>
+                <p title="Restrict allowed providers for policy/security.">`QA_RUNNER_AI_ALLOWED_PROVIDERS=agent,local`</p>
+              </div>
+            </details>
+          </details>
           <div className="space-y-2">
             <label className="text-xs font-semibold uppercase tracking-wide text-ink-500 dark:text-slate-400">
               Workspace Profile
@@ -3642,8 +4699,8 @@ date: 2026-03-28
                       className="mt-2 block w-full rounded-lg border border-surface-300 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-900"
                       disabled={busy}
                     >
-                      <option value="incomplete">Incomplete (default)</option>
-                      <option value="all">All</option>
+                      <option value="all">All (default)</option>
+                      <option value="incomplete">Incomplete</option>
                       <option value="completed">Completed</option>
                     </select>
                   </label>
@@ -4511,6 +5568,80 @@ date: 2026-03-28
 
         </div>
       </div>
+
+      {showArtifactModal ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" role="dialog" aria-modal="true">
+          <div className="max-h-[90vh] w-full max-w-5xl overflow-auto rounded-xl border border-surface-300 bg-white p-4 dark:border-slate-700 dark:bg-slate-950">
+            <div className="mb-3 flex items-center justify-between">
+              <p className="text-sm font-semibold text-ink-900 dark:text-white">Execution Artifacts</p>
+              <button
+                type="button"
+                onClick={() => setShowArtifactModal(false)}
+                className="rounded-lg border border-surface-300 px-2 py-1 text-xs font-semibold text-ink-700 dark:border-slate-700 dark:text-slate-200"
+              >
+                Close
+              </button>
+            </div>
+            <div className="space-y-2 text-xs text-ink-700 dark:text-slate-300">
+              {artifactEntries.map((item) => {
+                const ref = item.ref?.trim() || "";
+                const effectiveRef =
+                  item.key === "video" && ref.startsWith("/plugin/") && ref.endsWith("/artifacts/video")
+                    ? `${ref}/view`
+                    : item.key === "trace" && ref.startsWith("/plugin/") && ref.endsWith("/artifacts/trace")
+                      ? `${ref}/view`
+                    : ref;
+                const resolvedRef = resolveArtifactUrl(effectiveRef);
+                const isViewable = resolvedRef.startsWith("http://") || resolvedRef.startsWith("https://");
+                const isQaRef = ref.startsWith("qa://");
+                return (
+                  <div key={item.key} className="rounded-lg border border-surface-200 bg-surface-50 p-2 dark:border-slate-700 dark:bg-slate-900">
+                    <p className="font-semibold">{item.label}</p>
+                    <p className="mt-1 break-all">
+                      <code>{ref || "pending"}</code>
+                    </p>
+                    {isViewable ? (
+                      <a
+                        className="mt-1 inline-block font-semibold text-sky-700 underline dark:text-sky-300"
+                        href={resolvedRef}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                      >
+                        Open {item.label}
+                      </a>
+                    ) : isQaRef ? (
+                      <p className="mt-1 text-amber-700 dark:text-amber-300">
+                        Not materialized as a file in this run mode yet.
+                      </p>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+            {executeResult?.artifacts.reportRef && executeResult.artifacts.reportRef.startsWith("/plugin/") ? (
+              <div className="mt-4">
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-ink-500 dark:text-slate-400">Report Preview</p>
+                <iframe
+                  title="Playwright Report"
+                  src={resolveArtifactUrl(executeResult.artifacts.reportRef)}
+                  className="h-[60vh] w-full rounded-lg border border-surface-300 dark:border-slate-700"
+                />
+              </div>
+            ) : null}
+            {executeResult?.artifacts.videoRef && executeResult.artifacts.videoRef.startsWith("/plugin/") ? (
+              <div className="mt-4">
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-ink-500 dark:text-slate-400">Video Preview</p>
+                <video
+                  controls
+                  preload="metadata"
+                  src={resolveArtifactUrl(executeResult.artifacts.videoRef)}
+                  className="max-h-[60vh] w-full rounded-lg border border-surface-300 bg-black dark:border-slate-700"
+                />
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
 
       {showMobileSidebar ? (
         <div className="fixed inset-0 z-50 md:hidden" role="dialog" aria-modal="true">

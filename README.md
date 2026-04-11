@@ -43,31 +43,37 @@ npm install -D @talenttic/qa-runner
 npm install -D @talenttic/qa-runner
 ```
 
-2. Start daemon + UI:
+2. Create local env file:
+
+```bash
+cp .env.example .env
+```
+
+3. Start daemon + UI:
 
 ```bash
 npx qa-runner daemon start
 ```
 
-3. Open:
+4. Open:
 
 ```text
 http://localhost:4545/ui
 ```
 
-4. Generate artifacts:
+5. Generate artifacts:
 
 ```bash
 npx qa-runner generate --mode all --env stage
 ```
 
-5. Run test command + healing stats:
+6. Run test command + healing stats:
 
 ```bash
 npx qa-runner test --env stage --report-healing-stats
 ```
 
-6. KPI report:
+7. KPI report:
 
 ```bash
 npx qa-runner report --kpi --baseline-manifest tools/qa-runner.manifest.baseline.json
@@ -78,6 +84,29 @@ npx qa-runner report --kpi --baseline-manifest tools/qa-runner.manifest.baseline
 1. `qa-runner test` runs `tests.command` from `tools/qa-runner.config.js` when provided.
 2. If no `tests.command` is configured and `e2e/ui/package.json` is missing, the test runner step is skipped cleanly.
 3. AI auto-testing, self-healing, and flakiness are controlled by `tools/qa-runner.config.js`.
+4. Manual AI execution mode is controlled by `QA_RUNNER_PLAYWRIGHT_EXECUTION_MODE` and supports `stub|shell|ui|mcp` (default `mcp`).
+5. MCP runtime supports both transports:
+   - `QA_RUNNER_PLAYWRIGHT_MCP_TRANSPORT=http` with `QA_RUNNER_PLAYWRIGHT_MCP_URL`
+   - `QA_RUNNER_PLAYWRIGHT_MCP_TRANSPORT=stdio` with `QA_RUNNER_PLAYWRIGHT_MCP_COMMAND` and `QA_RUNNER_PLAYWRIGHT_MCP_ARGS`
+   - Default MCP args are `-y @playwright/mcp@0.0.70 --browser chromium` (headed by default unless `--headless` is added).
+6. MCP health endpoint:
+   - `GET /plugin/qa/mcp/health` returns last known MCP status.
+   - `GET /plugin/qa/mcp/health?probe=1` performs an active MCP connectivity probe.
+
+## MCP Troubleshooting
+
+1. `mcp_connect_timeout: fetch failed`
+   - Usually transport startup/connect race. Probe with `GET /plugin/qa/mcp/health?probe=1`.
+2. `mcp_process_exited: 1` with browser profile lock
+   - Ensure MCP args include `--isolated` so runs do not share profile state.
+3. `mcp_http_404: Session not found`
+   - Session expired/reset; rerun. Client now auto-recovers session on 404.
+4. `Ref ... not found in the current page snapshot`
+   - Snapshot ref went stale between read and click; re-snapshot + retry click (built into manual executor).
+5. No visible browser window while in MCP mode
+   - Headed mode requires a desktop display server. In headless/server environments (`DISPLAY` empty on Linux), execution is headless even when browser actions succeed.
+6. Route mismatch errors like navigating to `/the%20QA%20Runner%20UI`
+   - Use `Open base URL` in manual DSL steps instead of prose route text.
 
 ## Recommended Config File
 
@@ -128,7 +157,43 @@ npm run qa:report
 npm run qa:kpi
 npm run qa:kpi:enforce
 npm run qa:demo
+npm run dev:all
+npm run fixtures:dogfood:node
+npm run fixtures:dogfood:react
+npm run fixtures:dogfood
 ```
+
+`npm run dev:all` starts:
+1. Daemon API/UI backend on `http://localhost:4545` (`tsx watch` live reload for CLI/daemon source edits)
+2. UI Vite dev server (hot reload) on `http://localhost:2173`
+
+You can override UI dev port with `QA_RUNNER_UI_DEV_PORT`, for example:
+`QA_RUNNER_UI_DEV_PORT=3173 npm run dev:all`.
+`dev:all` also auto-sets:
+1. `VITE_API_URL=http://localhost:4545`
+2. `QA_RUNNER_CORS_ORIGIN=http://localhost:2173`
+3. Preflight checks for daemon/UI ports and exits early with a clear message if either port is already occupied.
+
+## Fixture App Dogfood
+
+This repo includes two fixture apps to validate module behavior as a consumer would use it:
+
+1. `fixtures/node-api` (Express login app)
+2. `fixtures/react-web` (Vite + React login app)
+
+Each fixture has:
+1. `tools/qa-runner.config.js` enabling `manualGuide`, `e2eScaffold`, `selfHealing`, `aiAutoTester`, and `flakinessDetector`.
+2. `e2e/ui` Playwright tests, including an intentional one-time flaky case for healing retries.
+3. Manual QA markdown for the manual AI checklist executor.
+
+Run full local dogfood on a fixture:
+
+```bash
+npm run fixtures:dogfood:node
+npm run fixtures:dogfood:react
+```
+
+The runner script (`scripts/run-fixture-dogfood.mjs`) installs a packed tarball of `@talenttic/qa-runner` into the fixture, starts the app + daemon, runs generation/tests, and validates manual AI execution end-to-end.
 
 ## Release
 
