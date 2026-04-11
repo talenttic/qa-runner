@@ -16,7 +16,7 @@ date: 2026-04-08
 - [ ] Verify GitHub Action "UI Performance Checks" runs.
 - [ ] Verify Lighthouse CI step completes and uploads a report.
 - [ ] Verify browser console has no errors.
-- [ ] Verify expected result: Lighthouse audit runs successfully.
+- [ ] Verify Lighthouse audit runs successfully.
 
 ## [cicd-bundle-size] Bundle size tracking runs in workflow
 - Priority: medium
@@ -30,6 +30,6 @@ date: 2026-04-08
 ### Steps
 - [ ] Run the "UI Performance Checks" workflow.
 - [ ] Verify the Bundle Size step runs.
-- [ ] Confirm size-limit reports asset sizes.
+- [ ] Verify size-limit reports asset sizes
 - [ ] (Optional) Temporarily increase bundle size to confirm failure.
-- [ ] Verify expected result: size-limit enforces thresholds.
+- [ ] Verify size-limit enforces thresholds.

@@ -18,7 +18,7 @@ date: 2026-04-08
 - [ ] Verify the report shows run ID, suite name, summary metrics, and case list.
 - [ ] Verify browser console has no errors.
 - [ ] Verify network/API requests have no failed calls.
-- [ ] Verify expected result: HTML report renders correctly.
+- [ ] Verify HTML report renders correctly.
 
 ## [report-pdf-print] Print PDF report
 - Priority: medium
@@ -37,7 +37,7 @@ date: 2026-04-08
 - [ ] Verify the PDF contains the report summary and case list.
 - [ ] Verify browser console has no errors.
 - [ ] Verify network/API requests have no failed calls.
-- [ ] Verify expected result: PDF output contains the report.
+- [ ] Verify PDF output contains the report.
 
 ## [report-metrics-trends] View metrics and trends
 - Priority: low
@@ -55,4 +55,4 @@ date: 2026-04-08
 - [ ] Verify Recent runs list shows the latest entries.
 - [ ] Verify browser console has no errors.
 - [ ] Verify network/API requests have no failed calls.
-- [ ] Verify expected result: metrics and trends display correctly.
+- [ ] Verify metrics and trends display correctly.

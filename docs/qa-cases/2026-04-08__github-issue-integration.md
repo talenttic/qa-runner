@@ -12,7 +12,7 @@ date: 2026-04-08
 - Notes:
 - FailureReason:
 ### Steps
-- [ ] Ensure QA Runner daemon has `QA_RUNNER_GITHUB_TOKEN` set.
+- [ ] Verify QA Runner daemon has `QA_RUNNER_GITHUB_TOKEN` set
 - [ ] Open a manual run with at least one case.
 - [ ] In GitHub Issue, enter Owner/org and Repo.
 - [ ] Enter Issue title, body, labels, and assignees.
@@ -22,7 +22,7 @@ date: 2026-04-08
 - [ ] Verify the created issue contains the entered fields.
 - [ ] Verify browser console has no errors.
 - [ ] Verify network/API requests have no failed calls.
-- [ ] Verify expected result: issue is created and accessible.
+- [ ] Verify issue is created and accessible.
 
 ## [github-issue-missing-fields] Validate required fields
 - Priority: medium
@@ -41,7 +41,7 @@ date: 2026-04-08
 - [ ] Verify no issue is created in GitHub.
 - [ ] Verify browser console has no errors.
 - [ ] Verify network/API requests have no failed calls.
-- [ ] Verify expected result: issue creation is blocked until required fields are provided.
+- [ ] Verify issue creation is blocked until required fields are provided.
 
 ## [github-issue-auth-missing] Handle missing token
 - Priority: medium
@@ -60,4 +60,4 @@ date: 2026-04-08
 - [ ] Verify no issue is created in GitHub.
 - [ ] Verify browser console has no errors.
 - [ ] Verify network/API requests have no failed calls.
-- [ ] Verify expected result: user sees a clear error for missing token.
+- [ ] Verify user sees a clear error for missing token.

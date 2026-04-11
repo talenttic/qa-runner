@@ -14,9 +14,9 @@ Status: Not Started
 ### Steps
 - [ ] Start the daemon (`qa-runner daemon start`) from the project root.
 - [ ] Open the UI at `http://localhost:4545/ui`.
-- [ ] Confirm at least one QA suite appears in the list.
+- [ ] Verify at least one QA suite appears in the list
 - [ ] Open a suite and verify case details render.
-- [ ] Check browser console for errors.
+- [ ] Verify no JavaScript errors
 
 ## [run-basic] Create And Complete A Manual Run
 Use Case: Verify a manual run can be created, updated, and finalized.

@@ -20,7 +20,7 @@ date: 2026-04-08
 - [ ] Click Retry Runtime.
 - [ ] Verify runtime status updates.
 - [ ] Verify browser console has no errors.
-- [ ] Verify expected result: retry buttons recover gracefully.
+- [ ] Verify retry buttons recover gracefully.
 
 ## [resilience-error-boundary] Error boundary recovery actions
 - Priority: low
@@ -37,7 +37,7 @@ date: 2026-04-08
 - [ ] Click Reload App and verify the UI reloads.
 - [ ] Trigger error again and click Reset UI State.
 - [ ] Verify local settings reset and UI reloads.
-- [ ] Verify expected result: recovery actions work.
+- [ ] Verify recovery actions work.
 
 ## [resilience-auto-retry] Automatic retry for fetches
 - Priority: medium
@@ -53,4 +53,4 @@ date: 2026-04-08
 - [ ] Trigger a fetch (reload suites or open a run).
 - [ ] Verify the UI eventually loads without manual retries.
 - [ ] Verify browser console has no errors after recovery.
-- [ ] Verify expected result: retry logic recovers from transient failures.
+- [ ] Verify retry logic recovers from transient failures.

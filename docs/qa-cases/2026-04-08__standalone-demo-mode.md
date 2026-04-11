@@ -19,7 +19,7 @@ date: 2026-04-08
 - [ ] Verify selecting a case shows steps and expected result.
 - [ ] Verify browser console has no errors.
 - [ ] Verify network/API requests have no failed calls.
-- [ ] Verify expected result: sample data renders without JSON parse errors.
+- [ ] Verify sample data renders without JSON parse errors.
 
 ## [demo-actions-blocked] Demo mode blocks server-backed actions
 - Priority: medium
@@ -33,10 +33,10 @@ date: 2026-04-08
 ### Steps
 - [ ] In demo mode, click Create Share Link.
 - [ ] Verify a message indicates daemon connection is required.
-- [ ] Attempt to add a comment or collaborator.
+- [ ] Verify to add a comment or collaborator
 - [ ] Verify a message indicates daemon connection is required.
-- [ ] Attempt to create a GitHub issue.
+- [ ] Verify to create a GitHub issue
 - [ ] Verify a message indicates daemon connection is required.
 - [ ] Verify browser console has no errors.
 - [ ] Verify network/API requests have no failed calls.
-- [ ] Verify expected result: actions are blocked with clear messaging.
+- [ ] Verify actions are blocked with clear messaging.

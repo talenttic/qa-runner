@@ -15,4 +15,4 @@ date: 2026-04-08
 - [ ] Open `packages/qa-runner-ui/docs/developer-guides.md`.
 - [ ] Verify sections for Skeletons, Keyboard Shortcuts, and Accessibility exist.
 - [ ] Verify code samples render correctly in markdown.
-- [ ] Verify expected result: documentation is complete and readable.
+- [ ] Verify documentation is complete and readable.

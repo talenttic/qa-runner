@@ -19,7 +19,7 @@ date: 2026-04-08
 - [ ] Verify custom test types match the config (label/description).
 - [ ] Verify browser console has no errors.
 - [ ] Verify network/API requests have no failed calls.
-- [ ] Verify expected result: custom types load successfully.
+- [ ] Verify custom types load successfully.
 
 ## [custom-types-select] Select custom test types
 - Priority: low
@@ -35,4 +35,4 @@ date: 2026-04-08
 - [ ] Verify the checkbox stays selected.
 - [ ] Run Prepare AI Run (if enabled) to ensure no UI errors.
 - [ ] Verify browser console has no errors.
-- [ ] Verify expected result: custom type selection is preserved.
+- [ ] Verify custom type selection is preserved.

@@ -21,7 +21,7 @@ date: 2026-04-08
 - [ ] Select Indigo preset.
 - [ ] Verify accents revert to default.
 - [ ] Verify browser console has no errors.
-- [ ] Verify expected result: presets update the UI theme.
+- [ ] Verify presets update the UI theme.
 
 ## [theme-custom-color] Use custom scheme
 - Priority: medium
@@ -40,7 +40,7 @@ date: 2026-04-08
 - [ ] Refresh the page.
 - [ ] Verify the custom color persists.
 - [ ] Verify browser console has no errors.
-- [ ] Verify expected result: custom theme is applied and persisted.
+- [ ] Verify custom theme is applied and persisted.
 
 ## [theme-high-contrast] Toggle high contrast mode
 - Priority: high
@@ -58,4 +58,4 @@ date: 2026-04-08
 - [ ] Toggle High contrast off.
 - [ ] Verify the UI returns to normal contrast.
 - [ ] Verify browser console has no errors.
-- [ ] Verify expected result: high contrast mode toggles correctly.
+- [ ] Verify high contrast mode toggles correctly.

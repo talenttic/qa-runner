@@ -13,14 +13,14 @@ date: 2026-04-08
 - FailureReason:
 ### Steps
 - [ ] Open QA Runner manual mode and select a suite.
-- [ ] Start a run (or open an existing run).
+- [ ] Open base URL
 - [ ] In Collaboration, enter a collaborator name and click Add.
 - [ ] Verify the collaborator chip appears in the list.
 - [ ] Refresh the page and reopen the same run.
 - [ ] Verify the collaborator list still shows the added name.
 - [ ] Verify browser console has no errors.
 - [ ] Verify network/API requests have no failed calls.
-- [ ] Verify expected result: collaborator is visible and persisted for the run.
+- [ ] Verify collaborator is visible and persisted for the run.
 
 ## [collab-remove-participant] Remove collaborator from a run
 - Priority: low
@@ -39,7 +39,7 @@ date: 2026-04-08
 - [ ] Verify the removed collaborator does not return.
 - [ ] Verify browser console has no errors.
 - [ ] Verify network/API requests have no failed calls.
-- [ ] Verify expected result: collaborator is removed and stays removed.
+- [ ] Verify collaborator is removed and stays removed.
 
 ## [collab-add-comment] Add a case comment
 - Priority: high
@@ -59,7 +59,7 @@ date: 2026-04-08
 - [ ] Verify the comment still appears.
 - [ ] Verify browser console has no errors.
 - [ ] Verify network/API requests have no failed calls.
-- [ ] Verify expected result: comment is visible and persisted for the case.
+- [ ] Verify comment is visible and persisted for the case.
 
 ## [collab-remove-comment] Remove a case comment
 - Priority: low
@@ -78,7 +78,7 @@ date: 2026-04-08
 - [ ] Verify the removed comment does not return.
 - [ ] Verify browser console has no errors.
 - [ ] Verify network/API requests have no failed calls.
-- [ ] Verify expected result: comment is removed and stays removed.
+- [ ] Verify comment is removed and stays removed.
 
 ## [collab-share-link] Share run link
 - Priority: medium
@@ -99,4 +99,4 @@ date: 2026-04-08
 - [ ] Verify a success message is displayed after creating the link.
 - [ ] Verify browser console has no errors.
 - [ ] Verify network/API requests have no failed calls.
-- [ ] Verify expected result: share link is copied and renders the run summary.
+- [ ] Verify share link is copied and renders the run summary.

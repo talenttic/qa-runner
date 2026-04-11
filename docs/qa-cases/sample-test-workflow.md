@@ -13,12 +13,12 @@ date: 2026-03-28
 - FailureReason:
 
 ### Steps
-- [ ] Open /manual-testing
+- [ ] Open base URL
 - [ ] Select suite
 - [ ] Click Start Run
 - [ ] Verify case list and status chips are visible
-- [ ] Open browser DevTools console and verify no JavaScript errors
-- [ ] Open browser network tab and verify API requests complete without failed calls
+- [ ] Verify no JavaScript errors
+- [ ] Verify no failed network requests
 
 ## [step-update] Update step checks and finalize
 - Priority: high
@@ -36,8 +36,8 @@ date: 2026-03-28
 - [ ] Add notes and evidence
 - [ ] Finalize run
 - [ ] Verify markdown file reflects status changes
-- [ ] Verify browser console has no JavaScript errors during save/finalize
-- [ ] Verify network/API requests for update and finalize return success status codes
+- [ ] Verify no JavaScript errors
+- [ ] Verify no failed network requests
 
 ---
 
