@@ -182,10 +182,12 @@ export class PlaywrightMcpClient {
       const port = randomPort();
       const endpoint = joinUrl(`http://localhost:${port}/mcp`);
       const attemptArgs = [...baseArgsWithoutPort, "--port", String(port)];
+      const isWindows = process.platform === "win32";
       const child = spawn(config.command, attemptArgs, {
         cwd: process.cwd(),
         env: process.env,
         stdio: ["ignore", "pipe", "pipe"],
+        shell: isWindows,
       });
       const processLogs: string[] = [];
       child.stdout?.on("data", (chunk) => appendProcessLogLine(processLogs, chunk));
@@ -325,6 +327,7 @@ export class PlaywrightMcpClient {
     notificationOnly = false,
     allowSessionRecovery = true,
     emptyPayloadRetriesLeft = 2,
+    networkRetriesLeft = 2,
   ): Promise<JsonRpcResponse> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.config.timeoutMs);
@@ -404,6 +407,31 @@ export class PlaywrightMcpClient {
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
         throw new Error("mcp_timeout");
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      const isTransientNetwork =
+        message.toLowerCase().includes("fetch failed") ||
+        message.toLowerCase().includes("econnrefused") ||
+        message.toLowerCase().includes("socket") ||
+        message.toLowerCase().includes("network");
+      if (isTransientNetwork && networkRetriesLeft > 0) {
+        if (allowSessionRecovery) {
+          this.sessionId = null;
+          try {
+            await this.initialize();
+          } catch {
+            // If re-init fails, we'll still retry the request.
+          }
+        }
+        await sleep(250);
+        return this.rpc(
+          request,
+          withSession,
+          notificationOnly,
+          allowSessionRecovery,
+          emptyPayloadRetriesLeft,
+          networkRetriesLeft - 1,
+        );
       }
       throw error;
     } finally {

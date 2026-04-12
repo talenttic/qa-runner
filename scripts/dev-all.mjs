@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 import { createServer } from "node:net";
 import process from "node:process";
 
@@ -41,30 +43,62 @@ const stopChildren = () => {
   }
 };
 
+const spawnNpm = (args, env) =>
+  spawn("npm", args, {
+    stdio: "inherit",
+    shell: process.platform === "win32",
+    env,
+  });
+
+const waitForExit = (child, name) =>
+  new Promise((resolve, reject) => {
+    child.on("error", reject);
+    child.on("exit", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      const exitCode = typeof code === "number" ? code : 1;
+      reject(new Error(`${name} failed with exit code ${exitCode}.`));
+    });
+  });
+
+const ensureUiNodeBuild = async () => {
+  const projectRoot = process.cwd();
+  const distInWorkspace = path.join(projectRoot, "packages", "qa-runner-ui", "dist", "index.js");
+  const distInNodeModules = path.join(
+    projectRoot,
+    "node_modules",
+    "@talenttic",
+    "qa-runner-ui",
+    "dist",
+    "index.js",
+  );
+  if (fs.existsSync(distInWorkspace) || fs.existsSync(distInNodeModules)) {
+    return;
+  }
+  console.log("qa-runner ui: building node assets (dist/index.js)...");
+  const build = spawnNpm(["run", "build:node", "-w", "@talenttic/qa-runner-ui"], {
+    ...process.env,
+  });
+  await waitForExit(build, "qa-runner ui build:node");
+};
+
 const start = async () => {
   await ensurePortAvailable(daemonPort, "Daemon");
   await ensurePortAvailable(uiDevPort, "UI dev");
+  await ensureUiNodeBuild();
 
-  const daemon = spawn("npm", ["run", "dev:daemon:watch"], {
-    stdio: "inherit",
-    env: {
+  const daemon = spawnNpm(["run", "dev:daemon:watch", "--", "--port", daemonPort], {
       ...process.env,
       QA_RUNNER_CORS_ORIGIN: process.env.QA_RUNNER_CORS_ORIGIN || uiOrigin,
       QA_RUNNER_DAEMON_PORT: daemonPort,
-    },
   });
-  const uiDevWithPort = spawn(
-    "npm",
-    ["run", "dev:ui"],
-    {
-      stdio: "inherit",
-      env: {
-        ...process.env,
-        VITE_API_URL: process.env.VITE_API_URL || daemonOrigin,
-        QA_RUNNER_UI_DEV_PORT: uiDevPort,
-      },
-    },
-  );
+  const uiDevWithPort = spawnNpm(["run", "dev:ui", "--", "--port", uiDevPort], {
+    ...process.env,
+    VITE_API_URL: process.env.VITE_API_URL || daemonOrigin,
+    QA_RUNNER_UI_DEV_PORT: uiDevPort,
+  });
   children.push(daemon, uiDevWithPort);
 
   daemon.on("exit", (code) => {
